@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Ignore docs folder
+python-doc/
+blender-doc/
+
 # C extensions
 *.so
 
