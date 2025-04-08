@@ -21,6 +21,7 @@ from substance_painter.export import ExportStatus
 import substance_painter.baking as baking
 import substance_painter.project as project
 import substance_painter.textureset as textureset
+import substance_painter.event
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -41,9 +42,12 @@ class BatchBakerWidget(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         
-        # Add state variables to store current mesh info
-        self.current_low_poly = None
-        self.current_high_poly = None
+        # Add state for batch processing
+        self.mesh_pairs_to_process: List[Tuple[str, str | None]] = []
+        self.current_pair_index: int = -1
+        self.is_batch_running: bool = False
+        self.loading_low_poly: str | None = None  # Store mesh being loaded
+        self.loading_high_poly: str | None = None # Store mesh being loaded
         
         # Create the main layout
         main_layout = QtWidgets.QVBoxLayout(self)
@@ -58,7 +62,7 @@ class BatchBakerWidget(QtWidgets.QWidget):
         title_label = QtWidgets.QLabel("Mesh Loader & Baker")
         title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
         description_label = QtWidgets.QLabel(
-            "Load low poly meshes and bake normal maps from high poly meshes"
+            "Load low poly meshes and bake selected maps from high poly meshes"
         )
         
         # Source mesh selection
@@ -140,7 +144,7 @@ class BatchBakerWidget(QtWidgets.QWidget):
         options_layout.addWidget(self.match_naming_checkbox)
         options_layout.addWidget(self.test_mode_checkbox)
         
-        # For compatibility, keep format combo but hide it
+        # Format combo (keep hidden)
         self.format_combo = QtWidgets.QComboBox()
         for format in ["png", "tga", "exr"]:
             self.format_combo.addItem(format)
@@ -149,18 +153,12 @@ class BatchBakerWidget(QtWidgets.QWidget):
         # --- Action Buttons --- 
         buttons_layout = QtWidgets.QHBoxLayout()
         
-        # Load Mesh button
-        self.load_button = QtWidgets.QPushButton("Load First Mesh")
-        self.load_button.setMinimumHeight(40)
-        self.load_button.clicked.connect(self._handle_load_mesh) # Connect to new handler
-        buttons_layout.addWidget(self.load_button)
-        
-        # Bake Normals button
-        self.bake_button = QtWidgets.QPushButton("Bake Selected Maps")
-        self.bake_button.setMinimumHeight(40)
-        self.bake_button.clicked.connect(self._handle_bake_normals) # Connect to new handler
-        self.bake_button.setEnabled(False) # Initially disabled
-        buttons_layout.addWidget(self.bake_button)
+        # NEW Run Batch button
+        self.run_batch_button = QtWidgets.QPushButton("Run Batch Process")
+        self.run_batch_button.setMinimumHeight(40)
+        self.run_batch_button.setStyleSheet("font-weight: bold;") # Make it stand out
+        self.run_batch_button.clicked.connect(self._run_batch_process) 
+        buttons_layout.addWidget(self.run_batch_button)
         
         # Status display
         self.status_label = QtWidgets.QLabel("Ready")
@@ -173,10 +171,13 @@ class BatchBakerWidget(QtWidgets.QWidget):
         main_layout.addWidget(source_group)
         main_layout.addWidget(settings_group)
         main_layout.addLayout(options_layout)
-        main_layout.addLayout(buttons_layout) # Add new buttons layout
+        main_layout.addLayout(buttons_layout) # Use the layout with the new button
         main_layout.addWidget(self.status_label)
         main_layout.addWidget(self.progress_bar)
         
+        # Connect listeners
+        sp.event.DISPATCHER.connect(sp.event.BakingProcessEnded, self._on_bake_finished)
+
     def _browse_folder(self, line_edit):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Directory")
         if folder:
@@ -187,139 +188,201 @@ class BatchBakerWidget(QtWidgets.QWidget):
         if file_path:
             line_edit.setText(file_path)
 
-    def _handle_load_mesh(self):
-        """Handles the 'Load First Mesh' button click."""
-        # Reset state
-        self.current_low_poly = None
-        self.current_high_poly = None
-        self.bake_button.setEnabled(False)
-        self._update_progress(0, 1, "Validating inputs...")
-
-        # Validate inputs
-        if not self._validate_inputs():
-            self.status_label.setText("Input validation failed.")
+    def _run_batch_process(self):
+        """Starts the batch processing workflow."""
+        if self.is_batch_running:
+            logger.warning("Batch process already running.")
             return
-
-        # Get settings
+            
+        self._update_progress(0, 1, "Starting batch process...")
+        self.run_batch_button.setEnabled(False)
+        self.is_batch_running = True
+        
+        # 1. Validate Inputs
+        if not self._validate_inputs():
+            self.status_label.setText("Input validation failed. Batch cancelled.")
+            self.run_batch_button.setEnabled(True)
+            self.is_batch_running = False
+            self._update_progress(0, 0, self.status_label.text())
+            return
+            
+        # 2. Get Settings
         settings = self._get_settings()
-        low_poly_folder = settings.get('low_poly_folder')
-        high_poly_folder = settings.get('high_poly_folder')
-        resolution = settings.get('resolution', '2048x2048')
-        match_naming = settings.get('match_naming', True)
-        bake_normal_enabled_in_ui = settings.get('maps', {}).get('normal', False)
-        resolution_int = int(resolution.split('x')[0]) # Convert resolution
+        low_poly_folder = settings['low_poly_folder']
+        high_poly_folder = settings['high_poly_folder']
+        self.resolution_int = int(settings['resolution'].split('x')[0]) # Store for use in loop
+        self.enabled_maps = settings['maps']
+        match_naming = settings['match_naming']
+        test_mode = settings['test_mode']
+        
+        # Check if any maps are selected for baking
+        self.any_bake_selected = any(self.enabled_maps.values())
+        if not self.any_bake_selected:
+             logger.info("No bake maps selected. Batch process will only load meshes.")
 
-        # Find mesh files
-        self._update_progress(0, 1, "Finding mesh files...")
+        # 3. Find and Match Meshes
         try:
+            self._update_progress(0, 1, "Finding mesh files...")
             low_poly_meshes = _find_mesh_files(low_poly_folder)
             if not low_poly_meshes:
-                raise ValueError("No mesh files found in the low poly folder")
+                raise ValueError("No mesh files found in the low poly folder.")
 
             high_poly_meshes = []
-            if bake_normal_enabled_in_ui:
+            needs_high_poly_globally = self.enabled_maps.get('normal', False) or self.enabled_maps.get('ambient_occlusion', False)
+            
+            if self.any_bake_selected and needs_high_poly_globally:
                 high_poly_meshes = _find_mesh_files(high_poly_folder)
                 if not high_poly_meshes:
-                    # Warn but proceed without high poly, bake button will be disabled
-                    logger.warning("No mesh files found in the high poly folder, normal baking will be disabled.")
-                    bake_normal_enabled_in_ui = False # Disable baking for this run
-            
-            # Match meshes
-            mesh_pairs = _match_meshes(high_poly_meshes, low_poly_meshes, match_naming)
-            if not mesh_pairs:
-                raise ValueError("Could not match any high poly to low poly meshes (or no low-poly meshes found)")
-            
-            # Select the first pair
-            first_low_poly, first_high_poly = mesh_pairs[0]
-            self.current_low_poly = first_low_poly
-            self.current_high_poly = first_high_poly if bake_normal_enabled_in_ui else None
-            
-            logger.info(f"Selected mesh pair: Low='{os.path.basename(self.current_low_poly)}', High='{os.path.basename(self.current_high_poly) if self.current_high_poly else 'None'}'")
-            self._update_progress(0, 1, f"Loading: {os.path.basename(self.current_low_poly)}")
+                    logger.warning("No mesh files found in the high poly folder. Normal/AO baking might fail for some meshes.")
 
-            # Load the mesh (create project)
-            # This now uses a simplified version of the old _process_mesh_pair
-            _load_mesh_into_new_project(self.current_low_poly, resolution_int)
-            
-            # If successful, update UI
-            self.status_label.setText(f"Loaded: {os.path.basename(self.current_low_poly)}")
-            
-            # Enable Bake button if *any* bake map is checked 
-            # (We handle missing high poly later if needed by specific bakers)
-            any_bake_selected = (self.bake_normal_checkbox.isChecked() or 
-                                 self.bake_ao_checkbox.isChecked() or 
-                                 self.bake_id_checkbox.isChecked())
-            
-            if any_bake_selected:
-                 self.bake_button.setEnabled(True)
+            all_mesh_pairs = _match_meshes(high_poly_meshes, low_poly_meshes, match_naming)
+            if not all_mesh_pairs:
+                raise ValueError("Could not match any high poly to low poly meshes (or no low-poly meshes found).")
+
+            # 4. Prepare List for Processing (Apply Test Mode)
+            if test_mode:
+                self.mesh_pairs_to_process = all_mesh_pairs[:1]
+                logger.info("Test Mode enabled: Processing only the first mesh pair.")
             else:
-                 self.bake_button.setEnabled(False)
+                self.mesh_pairs_to_process = all_mesh_pairs
+                logger.info(f"Processing {len(self.mesh_pairs_to_process)} mesh pairs.")
+
+            if not self.mesh_pairs_to_process:
+                 raise ValueError("No mesh pairs selected for processing (after applying test mode).")
+
+            # 5. Start Processing
+            self.current_pair_index = -1
+            self.progress_bar.setMaximum(len(self.mesh_pairs_to_process))
+            self.progress_bar.setValue(0)
+            self.progress_bar.setVisible(True)
+            
+            self._process_next_mesh_pair() # Kick off the first iteration
 
         except Exception as e:
-            error_msg = f"Error loading mesh: {str(e)}"
+            error_msg = f"Error preparing batch: {str(e)}"
             logger.error(error_msg)
             self.status_label.setText(error_msg)
-            QtWidgets.QMessageBox.critical(self, "Error", error_msg)
-            self.bake_button.setEnabled(False)
-        finally:
-            self._update_progress(0, 0, self.status_label.text()) # Clear progress bar
+            QtWidgets.QMessageBox.critical(self, "Batch Error", error_msg)
+            self.run_batch_button.setEnabled(True)
+            self.is_batch_running = False
+            self._update_progress(0, 0, self.status_label.text())
 
-
-    def _handle_bake_normals(self):
-        """Handles the 'Bake Selected Maps' button click (now asynchronous)."""
-        # Get current settings to see which maps are checked
-        settings = self._get_settings()
-        enabled_maps = settings.get('maps', {})
-        bake_normal = enabled_maps.get('normal', False)
-        bake_ao = enabled_maps.get('ambient_occlusion', False)
-        bake_id = enabled_maps.get('id', False)
-        
-        # Check if any map requires high poly but it's missing
-        needs_high_poly = bake_normal or bake_ao
-        if needs_high_poly and not self.current_high_poly:
-            logger.warning("Bake button clicked, but Normal or AO map requested and no high poly mesh is loaded.")
-            QtWidgets.QMessageBox.warning(self, "Baking Error", "Normal and/or AO map baking requires a high poly mesh, but none is loaded.")
-            self.bake_button.setEnabled(False) # Disable button again
+    def _process_next_mesh_pair(self):
+        """Loads and initiates baking for the next mesh pair in the list."""
+        if not self.is_batch_running:
+            logger.info("Process next mesh pair called, but batch is not running. Stopping.")
             return
+            
+        self.current_pair_index += 1
         
-        if not project.is_open():
-             logger.error("Bake button clicked, but no project is open.")
-             QtWidgets.QMessageBox.critical(self, "Baking Error", "No project is currently open. Please load a mesh first.")
-             self.bake_button.setEnabled(False)
-             return
+        if self.current_pair_index >= len(self.mesh_pairs_to_process):
+            self._finish_batch_process("Batch process completed successfully.")
+            return
+            
+        current_low_poly, current_high_poly = self.mesh_pairs_to_process[self.current_pair_index]
+        mesh_name = os.path.basename(current_low_poly)
+        progress_msg = f"Processing {self.current_pair_index + 1}/{len(self.mesh_pairs_to_process)}: {mesh_name}"
+        logger.info(progress_msg)
+        self._update_progress(self.current_pair_index, len(self.mesh_pairs_to_process), progress_msg)
 
-        # Disable button immediately
-        self.bake_button.setEnabled(False)
-        self._update_progress(0, 1, f"Starting bake from {os.path.basename(self.current_high_poly) if self.current_high_poly else 'None'}...")
-        
+        # Store the pair we are about to load (still needed for polling logic)
+        self.loading_low_poly = current_low_poly
+        self.loading_high_poly = current_high_poly
+
+        # --- Load Mesh --- 
         try:
-            texture_sets = textureset.all_texture_sets()
-            if not texture_sets:
-                raise RuntimeError("Cannot bake: No texture sets found.")
+            logger.info(f"Initiating project creation for: {mesh_name}")
+            _load_mesh_into_new_project(current_low_poly, self.resolution_int)
             
-            material_name = texture_sets[0].name()
-            logger.info(f"Baking selected maps async for texture set: {material_name}")
-
-            # Call the updated baking function with enabled maps
-            _bake_selected_maps(self.current_high_poly, material_name, enabled_maps)
-            
-            # Status label updated here to show baking started
-            self.status_label.setText("Normal map baking in progress...")
-            # Button remains disabled until callback runs
+            # Start polling for idle status after initiating load
+            self._start_polling_for_idle(mesh_name)
 
         except Exception as e:
-            error_msg = f"Error initiating bake: {str(e)}"
+            error_msg = f"Failed to initiate loading for {mesh_name}: {str(e)}. Skipping."
             logger.error(error_msg)
-            self.status_label.setText(error_msg)
-            QtWidgets.QMessageBox.critical(self, "Baking Error", error_msg)
-            # Re-enable button on immediate error
-            self.bake_button.setEnabled(True)
-            self._update_progress(0, 0, self.status_label.text()) # Clear progress
-             
+            QtWidgets.QMessageBox.warning(self, "Loading Error", error_msg)
+            QtCore.QTimer.singleShot(0, self._process_next_mesh_pair) 
+            
+    def _on_bake_finished(self, event_object):
+        """Callback triggered when an asynchronous bake finishes.
+        
+        Args:
+            event_object: The event object passed by the dispatcher.
+        """
+        logger.info(f"--- Entered _on_bake_finished --- Event Object Type: {type(event_object)}")
+        logger.debug(f"Event Object Dir: {dir(event_object)}")
+        
+        # Check if the event object is an instance of BakingProcessEnded
+        if isinstance(event_object, sp.event.BakingProcessEnded):
+            logger.info("Event type matched BakingProcessEnded (using isinstance).")
+            if not self.is_batch_running or self.current_pair_index < 0 or self.current_pair_index >= len(self.mesh_pairs_to_process):
+                 logger.warning("_on_bake_finished: Batch not running or index out of bounds. Returning.")
+                 return 
+                 
+            mesh_name = os.path.basename(self.mesh_pairs_to_process[self.current_pair_index][0])
+            logger.info(f"BakingProcessEnded event received for {mesh_name}.")
+            
+            # Try accessing event data - it might be the object itself or a .data attribute
+            bake_data = None
+            if isinstance(event_object, dict): # Should not happen now based on type check, but keep for safety
+                logger.debug("Treating event_object directly as bake_data dictionary.")
+                bake_data = event_object
+            elif hasattr(event_object, 'data') and isinstance(event_object.data, dict):
+                logger.debug("Accessing event_object.data as bake_data dictionary.")
+                bake_data = event_object.data
+            else:
+                # If it's not a dict and doesn't have a .data dict, maybe the object *itself* has the keys?
+                # Try getting status directly from the object attributes
+                if hasattr(event_object, 'status'):
+                    logger.debug("Attempting to read 'status' attribute directly from event_object.")
+                    # Construct a dict-like structure if needed downstream
+                    bake_data = {'status': getattr(event_object, 'status', 'success')} 
+                else:
+                     logger.warning(f"Could not determine bake_data from event_object. Type: {type(event_object)}, Dir: {dir(event_object)}")
+
+            # Check status if we found data
+            bake_failed = False 
+            if bake_data:
+                 status = bake_data.get('status') # Get the status object/enum
+                 # Compare against the actual enum for success
+                 if status != baking.BakingStatus.Success:
+                      bake_failed = True
+                      # Log as error only if it's truly not Success
+                      logger.error(f"Bake reported failure. Status: {status}, Data: {bake_data}")
+                      QtWidgets.QMessageBox.warning(self, "Bake Error", f"Baking failed for {mesh_name}. Status: {status}. Check logs. Continuing...")
+                 else:
+                     logger.info(f"Bake completed successfully for {mesh_name} (Status: {status}).")
+            else:
+                logger.warning(f"Could not extract bake status dictionary for {mesh_name}.")
+
+            if bake_failed:
+                 pass # Decide behavior on failure (currently logs and continues)
+
+            logger.info(f"Proceeding to next mesh after bake attempt for {mesh_name}.")
+            QtCore.QTimer.singleShot(0, self._process_next_mesh_pair)
+        # Removed the else block as isinstance handles non-matching types
+
+    def _finish_batch_process(self, final_message):
+        """Cleans up and resets UI after the batch process finishes or is stopped."""
+        logger.info(f"Finishing batch process: {final_message}")
+        self.status_label.setText(final_message)
+        self.run_batch_button.setEnabled(True)
+        self.is_batch_running = False
+        self.mesh_pairs_to_process = []
+        self.current_pair_index = -1
+        self.loading_low_poly = None
+        self.loading_high_poly = None
+        
+        self._update_progress(len(self.mesh_pairs_to_process) if len(self.mesh_pairs_to_process)>0 else 1, 
+                              len(self.mesh_pairs_to_process) if len(self.mesh_pairs_to_process)>0 else 1, 
+                              final_message) 
+        self.progress_bar.setVisible(False)
+
     def _update_progress(self, value, max_value, message=None):
-        self.progress_bar.setMaximum(max_value)
-        self.progress_bar.setValue(value)
-        self.progress_bar.setVisible(value < max_value and value > 0) # Show progress only when active
+        safe_max = max(1, max_value) 
+        self.progress_bar.setMaximum(safe_max)
+        self.progress_bar.setValue(min(value, safe_max)) 
+        self.progress_bar.setVisible(max_value > 0 and self.is_batch_running) 
         if message:
             self.status_label.setText(message)
     
@@ -329,22 +392,21 @@ class BatchBakerWidget(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Warning", "Low poly folder does not exist")
             return False
             
-        # Make sure there are mesh files in the folder
         low_poly_meshes = _find_mesh_files(self.low_poly_folder.text())
         if not low_poly_meshes:
             QtWidgets.QMessageBox.warning(self, "Warning", "No mesh files found in low poly folder")
             return False
         
-        # Check high poly folder if normal baking is enabled
-        if self.bake_normal_checkbox.isChecked():
+        # Check high poly folder if maps requiring it are checked
+        needs_high_poly = self.bake_normal_checkbox.isChecked() or self.bake_ao_checkbox.isChecked()
+        if needs_high_poly:
             if not os.path.isdir(self.high_poly_folder.text()):
-                QtWidgets.QMessageBox.warning(self, "Warning", "High poly folder does not exist")
+                QtWidgets.QMessageBox.warning(self, "Warning", "High poly folder does not exist (required for Normal/AO bake)")
                 return False
                 
-            # Make sure there are mesh files in the folder
             high_poly_meshes = _find_mesh_files(self.high_poly_folder.text())
             if not high_poly_meshes:
-                QtWidgets.QMessageBox.warning(self, "Warning", "No mesh files found in high poly folder")
+                QtWidgets.QMessageBox.warning(self, "Warning", "No mesh files found in high poly folder (required for Normal/AO bake)")
                 return False
         
         # Check template path
@@ -352,7 +414,6 @@ class BatchBakerWidget(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Warning", "Template project file does not exist")
             return False
         
-        # If template path is provided, verify it has .spp extension
         if self.template_path.text() and not self.template_path.text().lower().endswith('.spp'):
             QtWidgets.QMessageBox.warning(self, "Warning", "Template project must be a .spp file")
             return False
@@ -364,9 +425,9 @@ class BatchBakerWidget(QtWidgets.QWidget):
         settings = {
             'low_poly_folder': self.low_poly_folder.text(),
             'high_poly_folder': self.high_poly_folder.text(),
-            'export_folder': '',  # Not used but kept for compatibility
+            'export_folder': '', 
             'resolution': self.resolution_combo.currentText(),
-            'format': self.format_combo.currentText(),  # Kept for compatibility
+            'format': self.format_combo.currentText(), 
             'maps': {
                 'normal': self.bake_normal_checkbox.isChecked(),
                 'ambient_occlusion': self.bake_ao_checkbox.isChecked(),
@@ -374,359 +435,209 @@ class BatchBakerWidget(QtWidgets.QWidget):
             },
             'match_naming': self.match_naming_checkbox.isChecked(),
             'test_mode': self.test_mode_checkbox.isChecked(),
-
         }
         return settings
 
+    def _continue_after_load(self, current_low_poly, current_high_poly):
+        """Continues processing after the project is ready, checks for baking."""
+        if not self.is_batch_running: 
+            logger.warning("_continue_after_load called, but batch is not running. Stopping.")
+            return 
+        
+        mesh_name = os.path.basename(current_low_poly)
+        
+        # --- Check if Baking is Needed ---
+        if not self.any_bake_selected:
+            logger.info(f"No maps selected for baking. Skipping bake for {mesh_name}.")
+            QtCore.QTimer.singleShot(0, self._process_next_mesh_pair)
+            return
+
+        # --- Prepare for Bake ---
+        try:
+            logger.info(f"Attempting to get texture sets for {mesh_name}...") 
+            texture_sets = textureset.all_texture_sets()
+            logger.info(f"Found {len(texture_sets)} texture sets for {mesh_name}.") 
+            
+            if not texture_sets:
+                 raise RuntimeError(f"No texture sets found after loading {mesh_name}.")
+            
+            material_name = texture_sets[0].name() 
+            
+            needs_high_poly_for_maps = self.enabled_maps.get('normal', False) or self.enabled_maps.get('ambient_occlusion', False)
+            
+            if needs_high_poly_for_maps and not current_high_poly:
+                logger.warning(f"Normal/AO bake requested but no matching high poly found for {mesh_name}. Skipping bake.")
+                QtWidgets.QMessageBox.warning(self, "Baking Skipped", f"Normal/AO map baking skipped for {mesh_name} as no matching high poly was found.")
+                QtCore.QTimer.singleShot(0, self._process_next_mesh_pair)
+                return
+
+            # --- Initiate Bake ---
+            logger.info(f"Initiating bake for {mesh_name} (Material: {material_name})...")
+            self.status_label.setText(f"Baking {self.current_pair_index + 1}/{len(self.mesh_pairs_to_process)}: {mesh_name}...")
+            
+            _bake_selected_maps(current_high_poly, material_name, self.enabled_maps)
+
+        except Exception as e:
+            error_msg = f"Error preparing/initiating bake for {mesh_name}: {str(e)}. Skipping."
+            logger.error(error_msg)
+            QtWidgets.QMessageBox.critical(self, "Baking Error", error_msg)
+            QtCore.QTimer.singleShot(0, self._process_next_mesh_pair)
+
+    def _start_polling_for_idle(self, mesh_name):
+        """Starts a timer to periodically check if Painter is busy."""
+        logger.info(f"Starting polling for idle status (mesh: {mesh_name})...")
+        # Store loading state for the polling check
+        self.loading_low_poly = self.mesh_pairs_to_process[self.current_pair_index][0]
+        self.loading_high_poly = self.mesh_pairs_to_process[self.current_pair_index][1]
+        
+        self.idle_poll_timer = QtCore.QTimer(self)
+        self.idle_poll_timer.setInterval(250) 
+        self.idle_poll_timer.timeout.connect(self._check_if_idle)
+        self.idle_poll_timer.start()
+
+    def _check_if_idle(self):
+        """Checks if Painter is busy using project.is_busy()."""
+        if not self.is_batch_running or self.loading_low_poly is None:
+            if hasattr(self, 'idle_poll_timer') and self.idle_poll_timer.isActive():
+                self.idle_poll_timer.stop()
+                logger.info("Polling stopped because batch is not running or mesh not loading.")
+            return
+
+        try:
+            is_busy = project.is_busy()
+            if not is_busy:
+                self.idle_poll_timer.stop()
+                mesh_name = os.path.basename(self.loading_low_poly)
+                logger.info(f"Polling detected idle status for {mesh_name}. Proceeding...")
+                
+                current_low = self.loading_low_poly
+                current_high = self.loading_high_poly
+                
+                self.loading_low_poly = None
+                self.loading_high_poly = None
+                
+                self._continue_after_load(current_low, current_high)
+                
+        except Exception as e:
+            logger.error(f"Error during idle polling: {e}")
+            if hasattr(self, 'idle_poll_timer') and self.idle_poll_timer.isActive():
+                self.idle_poll_timer.stop()
+            self._finish_batch_process(f"Error during idle polling: {e}")
+
 #--------------------------------------------------------
-# BAKER FUNCTIONALITY (Modified)
+# BAKER FUNCTIONALITY (Reverted)
 #--------------------------------------------------------
 
 def _load_mesh_into_new_project(low_poly: str, resolution: int):
-    """Creates a new project with the given low poly mesh.
-    
-    Args:
-        low_poly: Path to low poly mesh
-        resolution: Texture resolution for the project
-    """
+    """Creates a new project with the given low poly mesh. (Reverted)"""
     logger.info(f"Attempting to load mesh: {os.path.basename(low_poly)}")
     
-    # Close any previously open project
     if project.is_open():
         logger.info("Closing existing project...")
         project.close()
 
-    # --- Create a new project --- 
     logger.info(f"Creating new project with mesh: {low_poly}")
     try:
         project_settings = project.Settings(
-            normal_map_format = project.NormalMapFormat.DirectX,
-            default_texture_resolution = resolution
+            normal_map_format=project.NormalMapFormat.DirectX,
+            default_texture_resolution=resolution
         )
-        
-        # Create the project
         project.create(mesh_file_path=low_poly, settings=project_settings)
         logger.info(f"Project creation command sent for: {os.path.basename(low_poly)}")
 
     except Exception as e:
-        # Error message now relates only to creation itself
         logger.error(f"Error during project creation: {str(e)}")
-        # Attempt to close project if open before re-raising
         if project.is_open():
             project.close()
-        # Re-raise to be caught by the button handler
         raise RuntimeError(f"Failed to create project with mesh {low_poly}: {str(e)}")
 
 def _bake_selected_maps(high_poly: str | None, material_name: str, enabled_maps: Dict[str, bool]):
-    """Initiates asynchronous baking of the selected maps for a specific material.
-
-    Args:
-        high_poly: Path to the high poly mesh file (can be None if only ID map is baked).
-        material_name: Name of the texture set/material to bake for.
-        enabled_maps: Dict indicating which maps to bake (e.g., {'normal': True, 'ambient_occlusion': False, 'id': True})
-    """
+    """Initiates asynchronous baking of the selected maps. (Reverted to simpler version)"""
     bake_normal = enabled_maps.get('normal', False)
     bake_ao = enabled_maps.get('ambient_occlusion', False)
-    bake_id = enabled_maps.get('id', False)
-    
+    bake_id = enabled_maps.get('id', False) # Assuming ID comes from Vertex Color implicitly
+
+    if not (bake_normal or bake_ao or bake_id):
+        logger.info("No maps selected for baking in _bake_selected_maps.")
+        return # Nothing to do
+
     log_high_poly = os.path.basename(high_poly) if high_poly else "None"
     enabled_map_names = [k for k, v in enabled_maps.items() if v]
     logger.info(f"Configuring bake for material '{material_name}' with high poly '{log_high_poly}'. Enabled maps: {enabled_map_names}")
 
     try:
-        # Get BakingParameters instance using the texture set name
         baking_params = baking.BakingParameters.from_texture_set_name(material_name)
         if not baking_params:
             raise ValueError(f"Could not get BakingParameters for TextureSet '{material_name}'.")
 
-        # Get the common parameters dictionary
+        # Get common parameters (may not be strictly needed if not setting them)
         common_params = baking_params.common()
         if not common_params:
-             raise RuntimeError("Could not retrieve common baking parameters.")
+             logger.warning("Could not retrieve common baking parameters (might be ok).")
 
-        # --- Prepare parameters dictionary for setting ---
-        # Try getting resolution from TextureSet, fallback to project setting, then default
-        bake_resolution = None
-        resolution_source = "Unknown"
-        try:
-            ts_res_obj = baking_params.texture_set().get_resolution()
-            # Check if it's the expected Resolution object or similar with attributes
-            if hasattr(ts_res_obj, 'width') and hasattr(ts_res_obj, 'height'):
-                 bake_resolution = (ts_res_obj.width, ts_res_obj.height)
-                 resolution_source = "TextureSet"
-            # Check if it's already a tuple (less likely based on error)
-            elif isinstance(ts_res_obj, tuple) and len(ts_res_obj) == 2 and all(isinstance(x, int) for x in ts_res_obj):
-                 bake_resolution = ts_res_obj
-                 resolution_source = "TextureSet (tuple)"
-            else:
-                 logger.warning(f"TextureSet resolution format not recognized: {ts_res_obj}. Trying project default.")
-        except Exception as e:
-            logger.warning(f"Could not get TextureSet resolution: {e}. Trying project default.")
-
-        if not bake_resolution:
-             try:
-                 # Assuming project settings also returns Resolution object or tuple
-                 proj_res_obj = project.Settings().default_texture_resolution
-                 if hasattr(proj_res_obj, 'width') and hasattr(proj_res_obj, 'height'):
-                     bake_resolution = (proj_res_obj.width, proj_res_obj.height)
-                     resolution_source = "ProjectDefault"
-                 elif isinstance(proj_res_obj, tuple) and len(proj_res_obj) == 2 and all(isinstance(x, int) for x in proj_res_obj):
-                     bake_resolution = proj_res_obj
-                     resolution_source = "ProjectDefault (tuple)"
-                 else:
-                      logger.warning(f"Project default resolution format not recognized: {proj_res_obj}. Falling back to default.")
-             except Exception as e:
-                  logger.warning(f"Could not get project default resolution: {e}. Falling back to default.")
-
-        if not bake_resolution:
-            default_res = 2048
-            bake_resolution = (default_res, default_res)
-            logger.warning(f"Falling back to default resolution: {default_res}x{default_res}")
-            resolution_source = "FallbackDefault"
-
-        # Final check if bake_resolution is now a valid tuple of integers
-        if not (isinstance(bake_resolution, tuple) and len(bake_resolution) == 2 and all(isinstance(x, int) for x in bake_resolution)):
-             raise TypeError(f"Could not obtain a valid (int, int) bake_resolution. Last attempt (source: {resolution_source}): {bake_resolution}")
-
-        logger.info(f"Final bake resolution to use: {bake_resolution[0]}x{bake_resolution[1]}")
-
-        # --- Set TextureSet Resolution Directly ---
-        try:
-            ts = baking_params.texture_set()
-            if ts:
-                resolution_obj = textureset.Resolution(bake_resolution[0], bake_resolution[1])
-                ts.set_resolution(resolution_obj)
-            else:
-                logger.warning("Could not get TextureSet object from BakingParameters to set resolution directly.")
-        except Exception as e:
-            logger.error(f"Error setting TextureSet resolution directly: {e}")
-            # Decide if this is critical - maybe proceed anyway?
-            # raise # Or just log and continue
-
-        # Format high poly path using QUrl as per example
-        highpoly_mesh_path_url = QtCore.QUrl.fromLocalFile(high_poly).toString() if high_poly else "None"
-        logger.info(f"Formatted high poly path: {highpoly_mesh_path_url}")
-        
-        # --- Unlink common parameters before setting ---
-        try:
-            baking.unlink_all_common_parameters()
-        except Exception as e:
-            logger.warning(f"Failed to call unlink_all_common_parameters: {e}")
-
-        # Define the dictionary for BakingParameters.set()
-        # Use keys *found* in common_params, referencing the logged output
+        # --- Prepare minimal parameters ---
         parameters_to_set = {}
-        
-        # Parameter mapping: Desired Setting -> Actual Key in common_params (UPDATED BASED ON LOG OUTPUT)
-        param_key_map = {
-            'output_size': 'OutputSize', 
-            'hipoly_mesh': 'HipolyMesh', 
-            'use_low_poly': 'LowAsHigh', 
-            'avg_normals': 'SmoothNormals', 
-            'ignore_backface': 'IgnoreBackface', 
-            'match_option': 'FilterMethod', 
-            'cage_mode': 'CageMode'
-        }
-
-        # High Poly Mesh - Only set if needed
-        key = param_key_map.get('hipoly_mesh')
         if (bake_normal or bake_ao) and high_poly:
-             if key and key in common_params:
-                 parameters_to_set[common_params[key]] = highpoly_mesh_path_url
-             elif key:
-                  logger.error(f"Could not find key '{key}' for High Poly Mesh in common_params. Cannot set mesh.")
-                  raise KeyError(f"Missing required parameter key: {key}")
-             else:
-                  logger.error("Internal error: 'hipoly_mesh' not found in param_key_map.")
-                  raise KeyError("Missing required internal parameter mapping for 'hipoly_mesh'")
-        elif bake_normal or bake_ao:
-             # This case should ideally be caught by _handle_bake_normals, but log just in case
-             logger.error("Normal or AO bake requested, but high_poly path is missing in _bake_selected_maps.")
-             raise ValueError("High poly mesh required for Normal/AO bake but not provided.")
-        else:
-            logger.info("HipolyMesh parameter not set as Normal and AO are disabled.")
-             
-        # Use Low Poly as High Poly - Keep setting this, might be relevant for some bakers?
-        key = param_key_map.get('use_low_poly')
-        if key and key in common_params:
-            parameters_to_set[common_params[key]] = False
-        elif key:
-            logger.warning(f"Could not find key '{key}' for Use Low Poly in common_params.")
-
-        # Average Normals - Only relevant for Normal map?
-        key = param_key_map.get('avg_normals')
-        if bake_normal:
-             if key and key in common_params:
-                 parameters_to_set[common_params[key]] = True
-             elif key: 
-                 logger.warning(f"Could not find key '{key}' for Average Normals in common_params.")
-        else:
-            logger.info("SmoothNormals parameter not set as Normal bake is disabled.")
-
-        # Ignore Backface - Only relevant for Normal/AO?
-        key = param_key_map.get('ignore_backface')
-        if bake_normal or bake_ao:
-             if key and key in common_params:
-                  parameters_to_set[common_params[key]] = True
-             elif key:
-                  logger.warning(f"Could not find key '{key}' for Ignore Backface in common_params.")
-        else:
-            logger.info("IgnoreBackface parameter not set as Normal/AO bake is disabled.")
-
-        # Match Option - Only relevant for Normal/AO?
-        key = param_key_map.get('match_option')
-        if bake_normal or bake_ao:
-             if key and key in common_params:
-                 match_prop = common_params[key]
-                 try:
-                      parameters_to_set[match_prop] = match_prop.enum_value('Always') 
-                 except AttributeError:
-                     logger.warning(f"Could not call enum_value on match property {match_prop}. Trying string 'Always'.")
-                     parameters_to_set[match_prop] = 'Always'
-                 except Exception as e:
-                      logger.warning(f"Error setting match option using key '{key}': {e}")
-             elif key:
-                 logger.warning(f"Could not find key '{key}' for Match Option in common_params.")
-        else:
-            logger.info("Match Option parameter not set as Normal/AO bake is disabled.")
-
-        # Cage Mode (Set to Automatic) - Only relevant for Normal/AO?
-        key = param_key_map.get('cage_mode')
-        if bake_normal or bake_ao:
-            if key and key in common_params:
-                 cage_prop = common_params[key]
-                 try:
-                      parameters_to_set[cage_prop] = cage_prop.enum_value('Automatic (experimental)') 
-                 except AttributeError:
-                     logger.warning(f"Could not call enum_value on cage property {cage_prop}. Trying string 'Automatic (experimental)'.")
-                     parameters_to_set[cage_prop] = 'Automatic (experimental)'
-                 except Exception as e:
-                      logger.warning(f"Error setting Cage Mode using key '{key}': {e}")
-            elif key:
-                 logger.warning(f"Could not find key '{key}' for Cage Mode in common_params.")
-        else:
-            logger.info("Cage Mode parameter not set as Normal/AO bake is disabled.")
-
-        # --- Configure AO Specific Parameters ---
-        if bake_ao:
-            # Use the baker() method with the correct MeshMapUsage enum
-            ao_baker = baking_params.baker(baking.MeshMapUsage.AO) 
-            if ao_baker:
-                ao_params = ao_baker # Access parameters directly from the baker object
-                ao_param_key_map = {} # Store mapping 
-                # Iterate through the keys provided by the baker object
-                ao_param_keys = ao_params.keys()
-                for key in ao_param_keys:
-                    # Using the actual key string now
-                    if 'ray' in key.lower() or 'sample' in key.lower():
-                        ao_param_key_map.setdefault('secondary_rays', key)
-                    if 'occluder' in key.lower() and 'max' in key.lower():
-                        ao_param_key_map.setdefault('max_occluder_distance', key)
-                    if 'occluder' in key.lower() and 'min' in key.lower():
-                         ao_param_key_map.setdefault('min_occluder_distance', key)
-                    if 'spread' in key.lower():
-                        ao_param_key_map.setdefault('spread_angle', key)
-                    if 'distribution' in key.lower():
-                        ao_param_key_map.setdefault('distribution', key)
-
+            # Find the HipolyMesh key dynamically if possible
+            hipoly_key_name = 'HipolyMesh' # Assume default key name
+            hipoly_prop = common_params.get(hipoly_key_name) if common_params else None
+            
+            if hipoly_prop:
+                 highpoly_mesh_path_url = QtCore.QUrl.fromLocalFile(high_poly).toString()
+                 parameters_to_set[hipoly_prop] = highpoly_mesh_path_url
+                 logger.info(f"Setting high poly mesh: {highpoly_mesh_path_url}")
             else:
-                logger.warning("Could not retrieve AO-specific baker parameters using baker(MeshMapUsage.AO).")
-        else:
-             logger.info("AO baking is disabled, skipping AO-specific parameters.")
+                 logger.warning(f"Could not find property for '{hipoly_key_name}'. High poly might not be set.")
+                 # Optionally, could try setting by string key if property lookup fails
+                 # parameters_to_set[hipoly_key_name] = QtCore.QUrl.fromLocalFile(high_poly).toString()
 
-        # --- Configure ID Specific Parameters ---
-        if bake_id:
-            # Use the baker() method with the correct MeshMapUsage enum
-            id_baker = baking_params.baker(baking.MeshMapUsage.ID) 
-            if id_baker:
-                id_params = id_baker
-                id_param_keys = id_params.keys()
-                
-                color_source_key = None # Variable to store the found key
-                for key in id_param_keys:
-                    # Find the key for color source (likely contains 'color' and 'source')
-                    if 'color' in key.lower() and 'source' in key.lower():
-                        color_source_key = key
-                        break # Assume the first match is the correct one
-
-                if color_source_key:
-                    color_source_prop = id_params[color_source_key]
-                    try:
-                        # --- Set the value using the integer representation ---
-                        vertex_color_int_value = 0 # Assuming 1 represents Vertex Color
-                        parameters_to_set[color_source_prop] = vertex_color_int_value
-                        logger.info(f"  Set ID Param '{color_source_key}' to {vertex_color_int_value} (assumed value for Vertex Color).")
-
-                    except Exception as e:
-                         logger.error(f"  Failed to set ID Param '{color_source_key}' using integer value {vertex_color_int_value}: {e}")
-                else:
-                     logger.warning("  Could not find the 'Color Source' parameter key for the ID baker.")
-
-            else:
-                logger.warning("Could not retrieve ID-specific baker parameters using baker(MeshMapUsage.ID).")
-
-        # --- Get Available MeshMapUsage Enums ---
+        # --- Enable Bakers ---
         available_enums = {}
         if hasattr(baking, 'MeshMapUsage'):
             for name in dir(baking.MeshMapUsage):
-                if not name.startswith('_'): # Skip private/dunder attributes
+                if not name.startswith('_'):
                     try:
                         enum_member = getattr(baking.MeshMapUsage, name)
-                        # Basic check if it's likely an enum value (might need refinement)
                         if isinstance(enum_member, baking.MeshMapUsage):
                              available_enums[name] = enum_member
                     except AttributeError:
-                        continue # Skip if getattr fails
-
-        requested_to_enum_name = {}
-        if bake_normal:
-            requested_to_enum_name['normal'] = 'Normal'
-        if bake_ao:
-            requested_to_enum_name['ambient_occlusion'] = 'AO'
-        if bake_id:
-            requested_to_enum_name['id'] = 'ID'
+                        continue
         
-        # --- Build the list of actual enums to enable --- 
+        requested_to_enum_name = {}
+        if bake_normal: requested_to_enum_name['normal'] = 'Normal'
+        if bake_ao: requested_to_enum_name['ambient_occlusion'] = 'AO'
+        if bake_id: requested_to_enum_name['id'] = 'ID' # Assuming 'ID' corresponds to VertexColor source implicitly
+
         bakers_to_enable_enums = []
         enabled_baker_names_log = []
-        missing_baker_names_log = []
-
         for map_key, enum_name in requested_to_enum_name.items():
             if enum_name in available_enums:
                 bakers_to_enable_enums.append(available_enums[enum_name])
                 enabled_baker_names_log.append(enum_name)
             else:
-                 logger.warning(f"Cannot enable baker for '{map_key}': Enum 'baking.MeshMapUsage.{enum_name}' not found in available enums {list(available_enums.keys())}.")
-                 missing_baker_names_log.append(enum_name)
+                 logger.warning(f"Cannot enable baker for '{map_key}': Enum 'baking.MeshMapUsage.{enum_name}' not found.")
 
         if not bakers_to_enable_enums:
-             logger.error("No requested bakers could be enabled because required MeshMapUsage enums were not found.")
-             raise RuntimeError("Failed to find any valid bakers to enable.")
+             raise RuntimeError("No requested bakers could be enabled.")
         
-        # --- Set Enabled Bakers using the Enum List --- 
-        try:
-            logger.info(f"Attempting to enable bakers using enums: {enabled_baker_names_log}")
-            if missing_baker_names_log:
-                logger.warning(f"Skipped unavailable bakers: {missing_baker_names_log}")
-            baking_params.set_enabled_bakers(bakers_to_enable_enums)
-            logger.info(f"Successfully enabled bakers: {enabled_baker_names_log}")
-        except Exception as e:
-             # Catch any error during setting bakers with the enum list
-             logger.error(f"Failed to enable selected bakers using enums {enabled_baker_names_log}: {e}")
-             raise RuntimeError(f"Could not enable selected bakers: {e}")
+        baking_params.set_enabled_bakers(bakers_to_enable_enums)
+        logger.info(f"Successfully enabled bakers: {enabled_baker_names_log}")
 
-        # --- Set the parameters using the class method ---
-        baking.BakingParameters.set(parameters_to_set)
-        
-        logger.info("Baker parameters configured. Starting asynchronous bake...")
-        
-        # --- Call the asynchronous baking function --- 
-        # Call with no arguments as per TypeError
+        # --- Set Parameters (only high poly if needed) ---
+        if parameters_to_set:
+            logger.info(f"Setting parameters: {parameters_to_set}")
+            baking.BakingParameters.set(parameters_to_set)
+        else:
+            logger.info("No specific parameters needed to be set apart from enabling bakers.")
+
+        # --- Start Bake ---
+        logger.info("Starting asynchronous bake...")
         baking.bake_selected_textures_async()         
+        logger.info("Asynchronous bake initiated.")
 
     except Exception as e:
         error_msg = f"Failed to configure or start bake for '{material_name}': {str(e)}"
-        logger.exception(error_msg) # Log with traceback
+        logger.exception(error_msg) 
         raise RuntimeError(error_msg)
 
 #--------------------------------------------------------
@@ -736,16 +647,9 @@ def _bake_selected_maps(high_poly: str | None, material_name: str, enabled_maps:
 def start_plugin():
     """Initialize the plugin"""
     global batch_baker_widget
-    
-    # Create widget
     batch_baker_widget = BatchBakerWidget()
-    
-    # Set window title for the dock
     batch_baker_widget.setWindowTitle("Batch Baker")
-    
-    # Create a docker widget
     docker = sp.ui.add_dock_widget(batch_baker_widget)
-    
     logger.info("Batch Baker plugin started")
     
 def close_plugin():
@@ -753,6 +657,17 @@ def close_plugin():
     global batch_baker_widget
     
     if batch_baker_widget:
+        # Disconnect the listeners first
+        try:
+            sp.event.DISPATCHER.disconnect(sp.event.BakingProcessEnded, batch_baker_widget._on_bake_finished)
+            logger.info("Disconnected BakingProcessEnded listener.")
+        except Exception as e:
+            logger.warning(f"Failed to disconnect BakingProcessEnded listener: {str(e)}")
+            
+        # Stop any running batch cleanly
+        if batch_baker_widget.is_batch_running:
+             batch_baker_widget._finish_batch_process("Batch process stopped by plugin closure.")
+
         sp.ui.delete_ui_element(batch_baker_widget)
         batch_baker_widget = None
     
@@ -769,12 +684,12 @@ def close_plugin():
     logger.info("Batch Baker plugin closed") 
 
 #--------------------------------------------------------
-# Helper Functions (Ensure these are defined above their first use)
+# Helper Functions 
 #--------------------------------------------------------
 def _find_mesh_files(folder_path: str) -> List[str]:
     """Finds mesh files (.fbx, .obj) in the specified folder."""
     mesh_files = []
-    supported_extensions = ('.fbx', '.obj') # Add more if needed
+    supported_extensions = ('.fbx', '.obj') 
     try:
         for filename in os.listdir(folder_path):
             if filename.lower().endswith(supported_extensions):
@@ -784,25 +699,16 @@ def _find_mesh_files(folder_path: str) -> List[str]:
     except Exception as e:
          logger.error(f"Error reading mesh folder {folder_path}: {e}")
     logger.info(f"Found {len(mesh_files)} mesh files in {folder_path}")
-    return sorted(mesh_files) # Sort for consistent ordering
+    return sorted(mesh_files) 
 
 def _extract_base_name(filename: str) -> str:
     """Extracts the base name from a mesh filename (e.g., 'mesh_low.fbx' -> 'mesh')."""
     base = os.path.basename(filename)
-    # Remove common suffixes like _low, _high, _lp, _hp before the extension
     base = re.sub(r'(_low|_lp|_high|_hp)?(\.fbx|\.obj)$', '', base, flags=re.IGNORECASE)
     return base
 
 def _match_meshes(high_poly_meshes: List[str], low_poly_meshes: List[str], match_by_naming: bool) -> List[Tuple[str, str | None]]:
-    """
-    Matches high poly meshes to low poly meshes.
-    
-    If match_by_naming is True, it tries to find pairs like 'name_high.fbx' and 'name_low.fbx'.
-    If False, or if naming match fails, it assumes a single high poly should be used for all low polys (if only one high poly exists).
-    
-    Returns:
-        A list of tuples: [(low_poly_path, high_poly_path_or_None), ...]
-    """
+    """Matches high poly meshes to low poly meshes."""
     mesh_pairs = []
     
     if not low_poly_meshes:
@@ -811,7 +717,6 @@ def _match_meshes(high_poly_meshes: List[str], low_poly_meshes: List[str], match
 
     if not high_poly_meshes:
         logger.warning("No high poly meshes provided. Baking from high poly will not be possible.")
-        # Return low polys paired with None
         return [(lp, None) for lp in low_poly_meshes]
 
     if match_by_naming:
@@ -819,29 +724,23 @@ def _match_meshes(high_poly_meshes: List[str], low_poly_meshes: List[str], match
         low_poly_map = { _extract_base_name(lp): lp for lp in low_poly_meshes }
         high_poly_map = { _extract_base_name(hp): hp for hp in high_poly_meshes }
         
-        matched_low_polys = set()
-
         for base_name, lp_path in low_poly_map.items():
             hp_path = high_poly_map.get(base_name)
-            if hp_path:
-                mesh_pairs.append((lp_path, hp_path))
-                matched_low_polys.add(lp_path)
-            else:
-                 mesh_pairs.append((lp_path, None)) # Low poly without a matching high poly
+            mesh_pairs.append((lp_path, hp_path)) # Will be None if no match
+            if not hp_path:
                  logger.warning(f"  No matching high poly found for base name '{base_name}' (Low: '{os.path.basename(lp_path)}')")
             
     else:
         logger.info("Match by naming disabled.")
-        # If only one high poly, assume it's for all low polys
         if len(high_poly_meshes) == 1:
             hp_path = high_poly_meshes[0]
             logger.info(f"Using single high poly '{os.path.basename(hp_path)}' for all low poly meshes.")
             mesh_pairs = [(lp, hp_path) for lp in low_poly_meshes]
         elif len(high_poly_meshes) > 1:
-             # Ambiguous case: Multiple high polys but no naming convention. Pair with None.
              logger.warning("Multiple high poly meshes found, but matching by name is disabled. Cannot determine pairings.")
              mesh_pairs = [(lp, None) for lp in low_poly_meshes]
-        # If zero high_poly_meshes, the initial check handles this.
+        else: # No high poly meshes
+             mesh_pairs = [(lp, None) for lp in low_poly_meshes]
 
     if not mesh_pairs:
          logger.warning("Could not form any mesh pairs based on the current settings.")
