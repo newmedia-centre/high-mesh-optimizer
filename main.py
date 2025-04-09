@@ -21,7 +21,7 @@ from substance_painter.export import ExportStatus
 import substance_painter.baking as baking
 import substance_painter.project as project
 import substance_painter.textureset as textureset
-import substance_painter.event
+import substance_painter.event as event
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -56,7 +56,6 @@ class BatchBakerWidget(QtWidgets.QWidget):
         # Default paths
         self.default_low_poly = "E:\\VRock2B\\ForSharif_03April2025\\GraphiteExports\\Low\\BlenderExport"
         self.default_high_poly = "E:\\VRock2B\\ForSharif_03April2025\\GraphiteExports\\High\\BlenderExport"
-        self.default_template = "C:\\Users\\sbayo\\Documents\\Adobe\\Adobe Substance 3D Painter\\python\\plugins\\AutoUnwrapDisabled.spp"
         
         # Add title and description
         title_label = QtWidgets.QLabel("Mesh Loader & Baker")
@@ -89,21 +88,10 @@ class BatchBakerWidget(QtWidgets.QWidget):
         high_poly_layout.addWidget(QtWidgets.QLabel("High Poly Folder:"))
         high_poly_layout.addWidget(self.high_poly_folder)
         high_poly_layout.addWidget(high_poly_button)
-        
-        # Template project path
-        template_layout = QtWidgets.QHBoxLayout()
-        self.template_path = QtWidgets.QLineEdit()
-        self.template_path.setText(self.default_template)
-        template_button = QtWidgets.QPushButton("Browse...")
-        template_button.clicked.connect(lambda: self._browse_file(self.template_path, "Select Template Project", "Substance Painter Project (*.spp)"))
-        template_layout.addWidget(QtWidgets.QLabel("Template Project:"))
-        template_layout.addWidget(self.template_path)
-        template_layout.addWidget(template_button)
-        
+   
         # Add to source layout
         source_layout.addLayout(low_poly_layout)
         source_layout.addLayout(high_poly_layout)
-        source_layout.addLayout(template_layout)
         
         # Project settings
         settings_group = QtWidgets.QGroupBox("Project Settings")
@@ -122,11 +110,8 @@ class BatchBakerWidget(QtWidgets.QWidget):
         # Baking options
         baking_layout = QtWidgets.QVBoxLayout()
         self.bake_normal_checkbox = QtWidgets.QCheckBox("Bake Normal Map")
-        self.bake_normal_checkbox.setChecked(True)
         self.bake_ao_checkbox = QtWidgets.QCheckBox("Bake Ambient Occlusion")
-        self.bake_ao_checkbox.setChecked(True) # Default to checked
         self.bake_id_checkbox = QtWidgets.QCheckBox("Bake ID Map (from Vertex Color)")
-        self.bake_id_checkbox.setChecked(True) # Default to checked
         baking_layout.addWidget(self.bake_normal_checkbox)
         baking_layout.addWidget(self.bake_ao_checkbox)
         baking_layout.addWidget(self.bake_id_checkbox)
@@ -144,13 +129,32 @@ class BatchBakerWidget(QtWidgets.QWidget):
         options_layout.addWidget(self.match_naming_checkbox)
         options_layout.addWidget(self.test_mode_checkbox)
         
-        # Format combo (keep hidden)
+        # Format combo
         self.format_combo = QtWidgets.QComboBox()
         for format in ["png", "tga", "exr"]:
             self.format_combo.addItem(format)
-        self.format_combo.setVisible(False)
+        self.format_combo.setVisible(True)
         
-        # --- Action Buttons --- 
+        # Export Settings
+        export_group = QtWidgets.QGroupBox("Export Settings")
+        export_layout = QtWidgets.QVBoxLayout()
+        export_group.setLayout(export_layout)
+        
+        export_folder_layout = QtWidgets.QHBoxLayout()
+        self.export_folder = QtWidgets.QLineEdit()
+        # Add a reasonable default export path or leave empty
+        default_export_path = os.path.join(os.path.dirname(self.default_low_poly), "..", "TextureExports")
+        self.export_folder.setText(os.path.abspath(default_export_path))
+        export_folder_button = QtWidgets.QPushButton("Browse...")
+        export_folder_button.clicked.connect(lambda: self._browse_folder(self.export_folder))
+        export_folder_layout.addWidget(QtWidgets.QLabel("Export Folder:"))
+        export_folder_layout.addWidget(self.export_folder)
+        export_folder_layout.addWidget(export_folder_button)
+        
+        # Add export widgets to export layout
+        export_layout.addLayout(export_folder_layout)
+        
+        # Action Buttons
         buttons_layout = QtWidgets.QHBoxLayout()
         
         # NEW Run Batch button
@@ -170,14 +174,15 @@ class BatchBakerWidget(QtWidgets.QWidget):
         main_layout.addWidget(description_label)
         main_layout.addWidget(source_group)
         main_layout.addWidget(settings_group)
+        main_layout.addWidget(export_group)
         main_layout.addLayout(options_layout)
         main_layout.addLayout(buttons_layout) # Use the layout with the new button
         main_layout.addWidget(self.status_label)
         main_layout.addWidget(self.progress_bar)
         
         # Connect listeners
-        sp.event.DISPATCHER.connect(sp.event.BakingProcessEnded, self._on_bake_finished)
-
+        event.DISPATCHER.connect(event.BakingProcessEnded, self._on_bake_finished)
+        
     def _browse_folder(self, line_edit):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Directory")
         if folder:
@@ -198,15 +203,15 @@ class BatchBakerWidget(QtWidgets.QWidget):
         self.run_batch_button.setEnabled(False)
         self.is_batch_running = True
         
-        # 1. Validate Inputs
+        # Validate Inputs
         if not self._validate_inputs():
             self.status_label.setText("Input validation failed. Batch cancelled.")
             self.run_batch_button.setEnabled(True)
             self.is_batch_running = False
             self._update_progress(0, 0, self.status_label.text())
             return
-            
-        # 2. Get Settings
+
+        # Get Settings
         settings = self._get_settings()
         low_poly_folder = settings['low_poly_folder']
         high_poly_folder = settings['high_poly_folder']
@@ -220,7 +225,7 @@ class BatchBakerWidget(QtWidgets.QWidget):
         if not self.any_bake_selected:
              logger.info("No bake maps selected. Batch process will only load meshes.")
 
-        # 3. Find and Match Meshes
+        # Find and Match Meshes
         try:
             self._update_progress(0, 1, "Finding mesh files...")
             low_poly_meshes = _find_mesh_files(low_poly_folder)
@@ -239,7 +244,7 @@ class BatchBakerWidget(QtWidgets.QWidget):
             if not all_mesh_pairs:
                 raise ValueError("Could not match any high poly to low poly meshes (or no low-poly meshes found).")
 
-            # 4. Prepare List for Processing (Apply Test Mode)
+            # Prepare List for Processing (Apply Test Mode)
             if test_mode:
                 self.mesh_pairs_to_process = all_mesh_pairs[:1]
                 logger.info("Test Mode enabled: Processing only the first mesh pair.")
@@ -250,7 +255,7 @@ class BatchBakerWidget(QtWidgets.QWidget):
             if not self.mesh_pairs_to_process:
                  raise ValueError("No mesh pairs selected for processing (after applying test mode).")
 
-            # 5. Start Processing
+            # Start Processing
             self.current_pair_index = -1
             self.progress_bar.setMaximum(len(self.mesh_pairs_to_process))
             self.progress_bar.setValue(0)
@@ -278,18 +283,18 @@ class BatchBakerWidget(QtWidgets.QWidget):
         if self.current_pair_index >= len(self.mesh_pairs_to_process):
             self._finish_batch_process("Batch process completed successfully.")
             return
-            
+        
         current_low_poly, current_high_poly = self.mesh_pairs_to_process[self.current_pair_index]
         mesh_name = os.path.basename(current_low_poly)
         progress_msg = f"Processing {self.current_pair_index + 1}/{len(self.mesh_pairs_to_process)}: {mesh_name}"
         logger.info(progress_msg)
         self._update_progress(self.current_pair_index, len(self.mesh_pairs_to_process), progress_msg)
 
-        # Store the pair we are about to load (still needed for polling logic)
+        # Store the pair we are about to load
         self.loading_low_poly = current_low_poly
         self.loading_high_poly = current_high_poly
 
-        # --- Load Mesh --- 
+        # Load Mesh
         try:
             logger.info(f"Initiating project creation for: {mesh_name}")
             _load_mesh_into_new_project(current_low_poly, self.resolution_int)
@@ -357,8 +362,15 @@ class BatchBakerWidget(QtWidgets.QWidget):
 
             if bake_failed:
                  pass # Decide behavior on failure (currently logs and continues)
+            else:
+                # --- Export After Successful Bake ---
+                export_path_base = self._get_settings().get('export_folder')
+                export_success = self._export_textures(export_path_base, mesh_name)
+                if not export_success:
+                    logger.warning(f"Export failed after successful bake for {mesh_name}, but continuing batch process.")
+                    # Decide if we should stop the batch here
 
-            logger.info(f"Proceeding to next mesh after bake attempt for {mesh_name}.")
+            logger.info(f"Proceeding to next mesh after bake/export attempt for {mesh_name}.")
             QtCore.QTimer.singleShot(0, self._process_next_mesh_pair)
         # Removed the else block as isinstance handles non-matching types
 
@@ -377,7 +389,7 @@ class BatchBakerWidget(QtWidgets.QWidget):
                               len(self.mesh_pairs_to_process) if len(self.mesh_pairs_to_process)>0 else 1, 
                               final_message) 
         self.progress_bar.setVisible(False)
-
+             
     def _update_progress(self, value, max_value, message=None):
         safe_max = max(1, max_value) 
         self.progress_bar.setMaximum(safe_max)
@@ -409,15 +421,20 @@ class BatchBakerWidget(QtWidgets.QWidget):
                 QtWidgets.QMessageBox.warning(self, "Warning", "No mesh files found in high poly folder (required for Normal/AO bake)")
                 return False
         
-        # Check template path
-        if self.template_path.text() and not os.path.isfile(self.template_path.text()):
-            QtWidgets.QMessageBox.warning(self, "Warning", "Template project file does not exist")
+        # Check export folder (now mandatory for batch process)
+        export_path = self.export_folder.text()
+        if not export_path:
+            QtWidgets.QMessageBox.warning(self, "Warning", "Export folder path cannot be empty.")
+            return False
+        # Check if the parent directory exists, as the export folder itself might not exist yet
+        parent_dir = os.path.dirname(export_path)
+        if parent_dir and not os.path.isdir(parent_dir): # Check parent only if export_path is not root
+            QtWidgets.QMessageBox.warning(self, "Warning", f"Parent directory for export folder does not exist: {parent_dir}")
+            return False
+        elif not parent_dir and not os.path.isdir(export_path): # Handle case where export path is root (e.g., D:\)
+            QtWidgets.QMessageBox.warning(self, "Warning", f"Export root directory does not exist: {export_path}")
             return False
         
-        if self.template_path.text() and not self.template_path.text().lower().endswith('.spp'):
-            QtWidgets.QMessageBox.warning(self, "Warning", "Template project must be a .spp file")
-            return False
-            
         return True
 
     def _get_settings(self):
@@ -425,9 +442,8 @@ class BatchBakerWidget(QtWidgets.QWidget):
         settings = {
             'low_poly_folder': self.low_poly_folder.text(),
             'high_poly_folder': self.high_poly_folder.text(),
-            'export_folder': '', 
             'resolution': self.resolution_combo.currentText(),
-            'format': self.format_combo.currentText(), 
+            'format': self.format_combo.currentText(),
             'maps': {
                 'normal': self.bake_normal_checkbox.isChecked(),
                 'ambient_occlusion': self.bake_ao_checkbox.isChecked(),
@@ -435,6 +451,8 @@ class BatchBakerWidget(QtWidgets.QWidget):
             },
             'match_naming': self.match_naming_checkbox.isChecked(),
             'test_mode': self.test_mode_checkbox.isChecked(),
+            # Export settings
+            'export_folder': self.export_folder.text()
         }
         return settings
 
@@ -449,6 +467,13 @@ class BatchBakerWidget(QtWidgets.QWidget):
         # --- Check if Baking is Needed ---
         if not self.any_bake_selected:
             logger.info(f"No maps selected for baking. Skipping bake for {mesh_name}.")
+            # --- Export Directly if Baking Skipped ---
+            export_path_base = self._get_settings().get('export_folder')
+            export_success = self._export_textures(export_path_base, mesh_name)
+            if not export_success:
+                 logger.warning(f"Export failed for {mesh_name}, but continuing batch process.")
+                 # Decide if we should stop the batch here
+            # Proceed to next mesh after export attempt
             QtCore.QTimer.singleShot(0, self._process_next_mesh_pair)
             return
 
@@ -524,6 +549,108 @@ class BatchBakerWidget(QtWidgets.QWidget):
                 self.idle_poll_timer.stop()
             self._finish_batch_process(f"Error during idle polling: {e}")
 
+    # --- NEW Export Method ---
+    def _export_textures(self, export_path_base: str, mesh_name: str):
+        """Exports textures for the current project.
+    
+    Args:
+            export_path_base: The base directory selected for export.
+            mesh_name: The base name of the mesh (e.g., '126_low') to create a subfolder.
+        """
+        if not project.is_open():
+            logger.error("Export called but no project is open.")
+            return False # Indicate failure
+            
+        # Create a mesh-specific subfolder
+        export_subfolder = os.path.join(export_path_base, os.path.splitext(mesh_name)[0])
+        try:
+            os.makedirs(export_subfolder, exist_ok=True)
+        except OSError as e:
+            logger.error(f"Could not create export subfolder '{export_subfolder}': {e}")
+            QtWidgets.QMessageBox.critical(self, "Export Error", f"Could not create export subfolder: {export_subfolder}\n{e}")
+            return False # Indicate failure
+            
+        logger.info(f"Starting texture export for {mesh_name} to '{export_subfolder}'...")
+        self.status_label.setText(f"Exporting {mesh_name}...")
+        QtWidgets.QApplication.processEvents() # Update UI
+        
+        # --- Get Texture Sets --- 
+        texture_sets = textureset.all_texture_sets()
+        if not texture_sets:
+             logger.error(f"No texture sets found to export for {mesh_name}.")
+             return False # Indicate failure
+        
+        texture_set_names = [ts.name() for ts in texture_sets]
+
+        # --- Get Preset URL using ResourceID (based on documentation example) ---
+        preset_name = "Unreal Engine (Packed)"
+        preset_context = "starter_assets" # Assuming it's here
+        preset_identifier_str = f"{preset_context}://export-presets/{preset_name}" # Fallback string
+        preset_url_to_use = preset_identifier_str # Default to fallback
+
+        try:
+            # Check if ResourceID exists before trying to use it
+            if hasattr(sp.resource, 'ResourceID'):
+                 logger.info(f"Attempting to get preset URL via ResourceID: context='{preset_context}', name='{preset_name}'")
+                 resource_id = sp.resource.ResourceID(context=preset_context, name=preset_name)
+                 # Check if url() method exists on the created object
+                 if hasattr(resource_id, 'url'):
+                     preset_url_from_api = resource_id.url()
+                     if preset_url_from_api:
+                         preset_url_to_use = preset_url_from_api
+                     else:
+                         logger.warning("ResourceID.url() returned empty. Using fallback identifier.")
+                 else:
+                     logger.warning("ResourceID object does not have .url() method. Using fallback identifier.")
+            else:
+                 logger.warning("sp.resource.ResourceID not found. Using fallback identifier string.")
+
+        except Exception as e:
+            logger.warning(f"Error getting preset URL via ResourceID: {e}. Using fallback identifier: {preset_url_to_use}")
+            # Keep the fallback identifier
+
+        # --- Build Export List (based on documentation example) ---
+        export_list_items = []
+        texture_sets_to_export = textureset.all_texture_sets()
+        if texture_sets_to_export:
+            for ts in texture_sets_to_export:
+                # Example uses rootPath with TextureSet name
+                export_list_items.append({"rootPath": ts.name()})
+            logger.info(f"Built exportList items (using rootPath = TextureSet name): {export_list_items}")
+        else:
+            logger.warning("No texture sets found to add to the export list.")
+
+        # --- Define Export Configuration (matching documentation example structure) ---
+        export_config = {
+            "exportShaderParams": True,
+            "exportPath": export_subfolder, # Global export path
+            "defaultExportPreset" : preset_url_to_use, # Use the determined preset URL or fallback
+            "exportList": export_list_items, # List with {'rootPath': ts_name}
+            "exportParameters": [
+                # Keep existing padding parameter
+                { "parameters": { "paddingAlgorithm": "infinite" } } 
+            ]
+        }
+
+        try:
+            # Start export
+            result = export.export_project_textures(export_config)
+            
+            # Check result status
+            if result.status == ExportStatus.Success:
+                logger.info(f"Texture export successful for {mesh_name}.")
+                self.status_label.setText(f"Exported {mesh_name}")
+                return True # Indicate success
+            else:
+                logger.error(f"Texture export failed for {mesh_name}. Status: {result.status}, Message: {result.message}")
+                QtWidgets.QMessageBox.critical(self, "Export Error", f"Texture export failed for {mesh_name}:\n{result.message}")
+                return False # Indicate failure
+                
+        except Exception as e:
+            logger.exception(f"An unexpected error occurred during export for {mesh_name}: {e}")
+            QtWidgets.QMessageBox.critical(self, "Export Error", f"An unexpected error occurred during export for {mesh_name}:\n{e}")
+            return False # Indicate failure
+
 #--------------------------------------------------------
 # BAKER FUNCTIONALITY (Reverted)
 #--------------------------------------------------------
@@ -560,7 +687,7 @@ def _bake_selected_maps(high_poly: str | None, material_name: str, enabled_maps:
     if not (bake_normal or bake_ao or bake_id):
         logger.info("No maps selected for baking in _bake_selected_maps.")
         return # Nothing to do
-
+    
     log_high_poly = os.path.basename(high_poly) if high_poly else "None"
     enabled_map_names = [k for k, v in enabled_maps.items() if v]
     logger.info(f"Configuring bake for material '{material_name}' with high poly '{log_high_poly}'. Enabled maps: {enabled_map_names}")
@@ -586,10 +713,38 @@ def _bake_selected_maps(high_poly: str | None, material_name: str, enabled_maps:
                  highpoly_mesh_path_url = QtCore.QUrl.fromLocalFile(high_poly).toString()
                  parameters_to_set[hipoly_prop] = highpoly_mesh_path_url
                  logger.info(f"Setting high poly mesh: {highpoly_mesh_path_url}")
-            else:
+        else:
                  logger.warning(f"Could not find property for '{hipoly_key_name}'. High poly might not be set.")
                  # Optionally, could try setting by string key if property lookup fails
                  # parameters_to_set[hipoly_key_name] = QtCore.QUrl.fromLocalFile(high_poly).toString()
+
+        # Set Cage Mode if needed for Normal/AO
+        cage_key = 'CageMode' # Default key, adjust if Substance API uses a different one
+        cage_value = 'Automatic (experimental)'
+        if bake_normal or bake_ao:
+            logger.info(f"Attempting to set cage mode to '{cage_value}' (using key '{cage_key}')")
+            if common_params and cage_key in common_params:
+                 cage_prop = common_params[cage_key]
+                 try:
+                      # Check if enum_value method exists and the value is valid before calling
+                      if hasattr(cage_prop, 'enum_value') and hasattr(cage_prop, 'enum_values') and cage_value in cage_prop.enum_values():
+                          parameters_to_set[cage_prop] = cage_prop.enum_value(cage_value)
+                          logger.info(f"Successfully set cage mode using enum value via property.")
+                      else:
+                          logger.warning(f"Property '{cage_key}' does not support enum value '{cage_value}' or method unavailable. Falling back to setting string value directly on property.")
+                          parameters_to_set[cage_prop] = cage_value # Fallback to string assignment on property object
+                 except Exception as e: # Catch potential errors during enum access/assignment
+                     logger.warning(f"Error setting cage mode via property '{cage_key}': {e}. Falling back to setting string value directly on property.")
+                     try:
+                         parameters_to_set[cage_prop] = cage_value # Try string assignment on property again
+                     except Exception as final_e:
+                         logger.error(f"Failed to set cage mode even with string fallback on property: {final_e}. Trying key string assignment as last resort.")
+                         # If assigning to property fails, try assigning to key string
+                         parameters_to_set[cage_key] = cage_value
+            else:
+                 logger.warning(f"Could not find property for '{cage_key}' in common_params or common_params unavailable. Attempting to set cage mode by key string '{cage_key}'.")
+                 # Fallback: Set using the string key directly if property/common_params not found
+                 parameters_to_set[cage_key] = cage_value
 
         # --- Enable Bakers ---
         available_enums = {}
@@ -632,7 +787,7 @@ def _bake_selected_maps(high_poly: str | None, material_name: str, enabled_maps:
 
         # --- Start Bake ---
         logger.info("Starting asynchronous bake...")
-        baking.bake_selected_textures_async()         
+        baking.bake_selected_textures_async() 
         logger.info("Asynchronous bake initiated.")
 
     except Exception as e:
@@ -723,7 +878,7 @@ def _match_meshes(high_poly_meshes: List[str], low_poly_meshes: List[str], match
         logger.info("Attempting to match high/low meshes by base name...")
         low_poly_map = { _extract_base_name(lp): lp for lp in low_poly_meshes }
         high_poly_map = { _extract_base_name(hp): hp for hp in high_poly_meshes }
-        
+
         for base_name, lp_path in low_poly_map.items():
             hp_path = high_poly_map.get(base_name)
             mesh_pairs.append((lp_path, hp_path)) # Will be None if no match
