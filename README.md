@@ -7,7 +7,7 @@ This repository contains scripts to streamline the mesh preparation and baking p
 The workflow involves two main parts:
 
 1.  **Blender Scripts (`blender-src/`):** Tools to prepare high and low poly meshes within Blender, designed to be run via the command line.
-2.  **Substance Painter Plugin (`main.py`):** A plugin for Substance Painter to automatically load mesh pairs, bake selected maps (Normal, AO, ID), and export the results.
+2.  **Substance Painter Plugin (`xrzone_batch_baker.py`):** A plugin for Substance Painter to automatically load mesh pairs, bake selected maps (Normal, AO, ID), and export the results.
 
 ## Blender Scripts (`blender-src/`)
 
@@ -48,7 +48,7 @@ These scripts are designed to be run via the Blender Command Line Interface (CLI
 
 **Note:** Ensure your Blender environment has the necessary permissions if reading/writing files across different drives or protected locations, especially when running via CLI.
 
-## Substance Painter Plugin (`main.py`)
+## Substance Painter Plugin (`xrzone_batch_baker.py`)
 
 This script is a plugin for Adobe Substance 3D Painter.
 
@@ -62,11 +62,11 @@ This script is a plugin for Adobe Substance 3D Painter.
 *   **Installation:**
     1.  Locate your Substance Painter plugins directory. This is usually in `Documents\Adobe\Adobe Substance 3D Painter\python\plugins`.
     2.  Create a new folder inside `plugins`, for example, `high-mesh-optimizer`.
-    3.  Copy the `main.py` file into this new folder (`Documents\Adobe\Adobe Substance 3D Painter\python\plugins\high-mesh-optimizer\main.py`).
-    4.  Restart Substance Painter.
+    3.  Copy the `substance-src/xrzone_batch_baker.py` file from this repository into the new folder (`Documents\Adobe\Adobe Substance 3D Painter\python\plugins\high-mesh-optimizer\xrzone_batch_baker.py`).
+    4.  Reload plugin via `Python` > `Reload Plugins Folder`.
     5.  Enable the plugin via `Python` > `Plugins` > `high-mesh-optimizer` (or whatever you named the folder).
 *   **Usage:**
-    1.  The "Batch Baker" panel will appear in Substance Painter (usually docked).
+    1.  The "Batch Baker" panel will appear in Substance Painter (usually docked otherwise open it from `Window` > `Views`).
     2.  **Source Meshes:**
         *   Browse to select the folder containing your prepared **Low Poly** meshes (output from `batch_uv_unwrap.py`).
         *   Browse to select the folder containing your prepared **High Poly** meshes (output from `batch_flip_merge_normal.py`).
@@ -77,7 +77,6 @@ This script is a plugin for Adobe Substance 3D Painter.
     4.  **Export Settings:**
         *   Browse to select the main **Export Folder** where texture subfolders will be created.
     5.  **Additional Options:**
-        *   Keep **Match high/low poly meshes by name** checked if your files follow a convention like `basename_high.ext` and `basename_low.ext`.
         *   Select the desired **Export Format** (png, tga, exr).
         *   Use **Test Mode** to process only the first found mesh pair for verification.
     6.  Click **Run Batch Process**.
@@ -87,14 +86,13 @@ This script is a plugin for Adobe Substance 3D Painter.
 
 1.  Organize your raw high and low poly meshes into separate input folders.
 2.  Prepare high poly meshes using `blender-src/batch_flip_merge_normal.py` via the command line, saving the output to a dedicated "prepared high" folder.
-3.  Prepare low poly meshes using `blender-src/batch_uv_unwrap.py` via the command line, saving the output to a dedicated "prepared low" folder.
+3.  Prepare low poly meshes using `blender-src/batch_uv_unwrap.py` and `blender-src/batch_flip_merge_normal.py` via the command line, saving the output to a dedicated "prepared low" folder.
 4.  Open Substance Painter and ensure the Batch Baker plugin is enabled.
 5.  Configure the plugin panel:
     *   Set Low Poly Folder to your "prepared low" folder.
     *   Set High Poly Folder to your "prepared high" folder.
     *   Choose resolution and maps to bake.
     *   Set the main Export Folder.
-    *   Adjust options (matching, format, test mode).
+    *   Adjust options (format, test mode).
 6.  Click "Run Batch Process" and monitor the progress bar and status label.
 7.  Find your baked textures in the specified Export Folder, organized into subdirectories named after the low poly meshes.
- 

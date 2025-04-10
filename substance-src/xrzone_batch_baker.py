@@ -25,7 +25,7 @@ import substance_painter.event as event
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("BatchBaker")
+logger = logging.getLogger("XRZone Batch Baker")
 
 # Global paths
 PLUGIN_PATH = os.path.dirname(os.path.realpath(__file__))
@@ -53,12 +53,11 @@ class BatchBakerWidget(QtWidgets.QWidget):
         main_layout = QtWidgets.QVBoxLayout(self)
         self.setLayout(main_layout)
         
-        # Default paths
-        self.default_low_poly = "E:\\VRock2B\\ForSharif_03April2025\\GraphiteExports\\Low\\BlenderExport"
-        self.default_high_poly = "E:\\VRock2B\\ForSharif_03April2025\\GraphiteExports\\High\\BlenderExport"
+        self.default_low_poly = ""
+        self.default_high_poly = ""
         
         # Add title and description
-        title_label = QtWidgets.QLabel("Mesh Loader & Baker")
+        title_label = QtWidgets.QLabel("XRZone Batch Baker")
         title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
         description_label = QtWidgets.QLabel(
             "Load low poly meshes and bake selected maps from high poly meshes"
@@ -122,11 +121,8 @@ class BatchBakerWidget(QtWidgets.QWidget):
         
         # Additional options
         options_layout = QtWidgets.QVBoxLayout()
-        self.match_naming_checkbox = QtWidgets.QCheckBox("Match high/low poly meshes by name (e.g. 123_high.xxx and 123_low.yyy)") # Update example
-        self.match_naming_checkbox.setChecked(True)
         self.test_mode_checkbox = QtWidgets.QCheckBox("Test Mode (process only the first mesh)")
         self.test_mode_checkbox.setChecked(True)
-        options_layout.addWidget(self.match_naming_checkbox)
         options_layout.addWidget(self.test_mode_checkbox)
         
         # Format combo
@@ -148,9 +144,8 @@ class BatchBakerWidget(QtWidgets.QWidget):
         
         export_folder_layout = QtWidgets.QHBoxLayout()
         self.export_folder = QtWidgets.QLineEdit()
-        # Add a reasonable default export path or leave empty
-        default_export_path = os.path.join(os.path.dirname(self.default_low_poly), "..", "TextureExports")
-        self.export_folder.setText(os.path.abspath(default_export_path))
+        # Set export folder to empty by default
+        self.export_folder.setText("")
         export_folder_button = QtWidgets.QPushButton("Browse...")
         export_folder_button.clicked.connect(lambda: self._browse_folder(self.export_folder))
         export_folder_layout.addWidget(QtWidgets.QLabel("Export Folder:"))
@@ -223,7 +218,6 @@ class BatchBakerWidget(QtWidgets.QWidget):
         high_poly_folder = settings['high_poly_folder']
         self.resolution_int = int(settings['resolution'].split('x')[0]) # Store for use in loop
         self.enabled_maps = settings['maps']
-        match_naming = settings['match_naming']
         test_mode = settings['test_mode']
         
         # Check if any maps are selected for baking
@@ -254,7 +248,7 @@ class BatchBakerWidget(QtWidgets.QWidget):
                     if self.enabled_maps.get('id'): needed_by.append("ID")
                     logger.warning(f"No mesh files found in high poly folder, but required for [{', '.join(needed_by)}]. Baking might fail.")
 
-            all_mesh_pairs = _match_meshes(high_poly_meshes, low_poly_meshes, match_naming)
+            all_mesh_pairs = _match_meshes(high_poly_meshes, low_poly_meshes)
             if not all_mesh_pairs:
                 raise ValueError("Could not match any high poly to low poly meshes (or no low-poly meshes found).")
 
@@ -452,7 +446,6 @@ class BatchBakerWidget(QtWidgets.QWidget):
                 'ambient_occlusion': self.bake_ao_checkbox.isChecked(),
                 'id': self.bake_id_checkbox.isChecked()
             },
-            'match_naming': self.match_naming_checkbox.isChecked(),
             'test_mode': self.test_mode_checkbox.isChecked(),
             # Export settings
             'export_folder': self.export_folder.text()
@@ -714,11 +707,11 @@ class BatchBakerWidget(QtWidgets.QWidget):
             return False
 
 #--------------------------------------------------------
-# BAKER FUNCTIONALITY (Reverted)
+# BAKER FUNCTIONALITY
 #--------------------------------------------------------
 
 def _load_mesh_into_new_project(low_poly: str, resolution: int):
-    """Creates a new project with the given low poly mesh. (Reverted)"""
+    """Creates a new project with the given low poly mesh."""
     logger.info(f"Attempting to load mesh: {os.path.basename(low_poly)}")
     
     if project.is_open():
@@ -746,9 +739,6 @@ def _bake_selected_maps(high_poly: str | None, material_name: str, enabled_maps:
     if not (bake_normal or bake_ao or bake_id):
         return
     
-    log_high_poly = os.path.basename(high_poly) if high_poly else "None"
-    enabled_map_names = [k for k, v in enabled_maps.items() if v]
-
     try:
         baking_params = baking.BakingParameters.from_texture_set_name(material_name)
         if not baking_params:
@@ -863,7 +853,6 @@ def _bake_selected_maps(high_poly: str | None, material_name: str, enabled_maps:
 
         # --- Set Parameters --- 
         if parameters_to_set:
-            logger.info(f"Setting parameters for bake: {list(parameters_to_set.keys())}")
             baking.BakingParameters.set(parameters_to_set)
         else:
             logger.info("No specific bake parameters needed beyond defaults.")
@@ -885,9 +874,9 @@ def start_plugin():
     """Initialize the plugin"""
     global batch_baker_widget
     batch_baker_widget = BatchBakerWidget()
-    batch_baker_widget.setWindowTitle("Batch Baker")
+    batch_baker_widget.setWindowTitle("XRZone Batch Baker")
     docker = sp.ui.add_dock_widget(batch_baker_widget)
-    logger.info("Batch Baker plugin started")
+    logger.info("XRZone Batch Baker plugin started")
     
 def close_plugin():
     """Clean up when the plugin is closed"""
@@ -907,7 +896,7 @@ def close_plugin():
         sp.ui.delete_ui_element(batch_baker_widget)
         batch_baker_widget = None
     
-    logger.info("Batch Baker plugin closed")
+    logger.info("XRZone Batch Baker plugin closed")
 
 #--------------------------------------------------------
 # Helper Functions 
@@ -932,38 +921,27 @@ def _extract_base_name(filename: str) -> str:
     base = re.sub(r'(_low|_lp|_high|_hp)?(\.fbx|\.obj|\.ply)$', '', base, flags=re.IGNORECASE)
     return base
 
-def _match_meshes(high_poly_meshes: List[str], low_poly_meshes: List[str], match_by_naming: bool) -> List[Tuple[str, str | None]]:
-    """Matches high poly meshes to low poly meshes."""
+def _match_meshes(high_poly_meshes: List[str], low_poly_meshes: List[str]) -> List[Tuple[str, str | None]]:
+    """Matches high poly meshes to low poly meshes based on extracted base name."""
     mesh_pairs = []
     
     if not low_poly_meshes:
         logger.warning("No low poly meshes provided for matching.")
         return []
 
-    # Check high poly list existence before proceeding
     if not high_poly_meshes:
-        return [(lp, None) for lp in low_poly_meshes] # Return low polys paired with None
+        return [(lp, None) for lp in low_poly_meshes]
 
-    if match_by_naming:
-        low_poly_map = { _extract_base_name(lp): lp for lp in low_poly_meshes }
-        high_poly_map = { _extract_base_name(hp): hp for hp in high_poly_meshes }
+    # Proceed with matching by name since high poly meshes exist
+    low_poly_map = { _extract_base_name(lp): lp for lp in low_poly_meshes }
+    high_poly_map = { _extract_base_name(hp): hp for hp in high_poly_meshes }
 
-        for base_name, lp_path in low_poly_map.items():
-            hp_path = high_poly_map.get(base_name)
-            mesh_pairs.append((lp_path, hp_path)) 
-            if not hp_path:
-                 logger.warning(f"  No matching high poly found for base name '{base_name}' (Low: '{os.path.basename(lp_path)}')")
+    for base_name, lp_path in low_poly_map.items():
+        hp_path = high_poly_map.get(base_name)
+        mesh_pairs.append((lp_path, hp_path)) 
+        if not hp_path:
+             logger.warning(f"  No matching high poly found for base name '{base_name}' (Low: '{os.path.basename(lp_path)}')")
             
-    else:
-        if len(high_poly_meshes) == 1:
-            hp_path = high_poly_meshes[0]
-            mesh_pairs = [(lp, hp_path) for lp in low_poly_meshes]
-        elif len(high_poly_meshes) > 1:
-             logger.warning("Multiple high poly meshes found, but matching by name is disabled. Cannot determine pairings.")
-             mesh_pairs = [(lp, None) for lp in low_poly_meshes]
-        else: # No high poly meshes (already handled above, but keep for safety)
-             mesh_pairs = [(lp, None) for lp in low_poly_meshes]
-
     if not mesh_pairs and low_poly_meshes: # Only warn if low polys existed but no pairs were made
          logger.warning("Could not form any mesh pairs based on the current settings and found meshes.")
          
