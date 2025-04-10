@@ -8,7 +8,7 @@ argv = sys.argv
 argv = argv[argv.index("--") + 1:] if "--" in argv else []
 
 if len(argv) < 1:
-    print("Usage: blender --background --python batch_flip_merge_normal.py -- input_directory [output_directory]")
+    print("Usage: blender --background --python batch_flip_merge_normal.py -- input_directory output_directory")
     sys.exit(1)
 
 # Get input and output directories and sanitize paths

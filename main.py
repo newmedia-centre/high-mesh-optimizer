@@ -111,7 +111,7 @@ class BatchBakerWidget(QtWidgets.QWidget):
         baking_layout = QtWidgets.QVBoxLayout()
         self.bake_normal_checkbox = QtWidgets.QCheckBox("Bake Normal Map")
         self.bake_ao_checkbox = QtWidgets.QCheckBox("Bake Ambient Occlusion")
-        self.bake_id_checkbox = QtWidgets.QCheckBox("Bake ID Map (from Vertex Color)")
+        self.bake_id_checkbox = QtWidgets.QCheckBox("Bake ID Map (Vertex Color -> BaseColor)")
         baking_layout.addWidget(self.bake_normal_checkbox)
         baking_layout.addWidget(self.bake_ao_checkbox)
         baking_layout.addWidget(self.bake_id_checkbox)
@@ -122,7 +122,7 @@ class BatchBakerWidget(QtWidgets.QWidget):
         
         # Additional options
         options_layout = QtWidgets.QVBoxLayout()
-        self.match_naming_checkbox = QtWidgets.QCheckBox("Match high/low poly meshes by name (e.g. 123_high.obj and 123_low.obj)")
+        self.match_naming_checkbox = QtWidgets.QCheckBox("Match high/low poly meshes by name (e.g. 123_high.xxx and 123_low.yyy)") # Update example
         self.match_naming_checkbox.setChecked(True)
         self.test_mode_checkbox = QtWidgets.QCheckBox("Test Mode (process only the first mesh)")
         self.test_mode_checkbox.setChecked(True)
@@ -134,6 +134,12 @@ class BatchBakerWidget(QtWidgets.QWidget):
         for format in ["png", "tga", "exr"]:
             self.format_combo.addItem(format)
         self.format_combo.setVisible(True)
+        format_label = QtWidgets.QLabel("Export Format:")
+        format_layout = QtWidgets.QHBoxLayout()
+        format_layout.addWidget(format_label)
+        format_layout.addWidget(self.format_combo)
+        format_layout.addStretch()
+        options_layout.addLayout(format_layout) # Add format selector here
         
         # Export Settings
         export_group = QtWidgets.QGroupBox("Export Settings")
@@ -233,12 +239,20 @@ class BatchBakerWidget(QtWidgets.QWidget):
                 raise ValueError("No mesh files found in the low poly folder.")
 
             high_poly_meshes = []
-            needs_high_poly_globally = self.enabled_maps.get('normal', False) or self.enabled_maps.get('ambient_occlusion', False)
+            # ID map now also needs high poly
+            needs_high_poly_globally = self.enabled_maps.get('normal', False) or \
+                                       self.enabled_maps.get('ambient_occlusion', False) or \
+                                       self.enabled_maps.get('id', False)
             
             if self.any_bake_selected and needs_high_poly_globally:
                 high_poly_meshes = _find_mesh_files(high_poly_folder)
                 if not high_poly_meshes:
-                    logger.warning("No mesh files found in the high poly folder. Normal/AO baking might fail for some meshes.")
+                    # Make warning more specific
+                    needed_by = []
+                    if self.enabled_maps.get('normal'): needed_by.append("Normal")
+                    if self.enabled_maps.get('ambient_occlusion'): needed_by.append("AO")
+                    if self.enabled_maps.get('id'): needed_by.append("ID")
+                    logger.warning(f"No mesh files found in high poly folder, but required for [{', '.join(needed_by)}]. Baking might fail.")
 
             all_mesh_pairs = _match_meshes(high_poly_meshes, low_poly_meshes, match_naming)
             if not all_mesh_pairs:
@@ -275,7 +289,6 @@ class BatchBakerWidget(QtWidgets.QWidget):
     def _process_next_mesh_pair(self):
         """Loads and initiates baking for the next mesh pair in the list."""
         if not self.is_batch_running:
-            logger.info("Process next mesh pair called, but batch is not running. Stopping.")
             return
             
         self.current_pair_index += 1
@@ -296,7 +309,6 @@ class BatchBakerWidget(QtWidgets.QWidget):
 
         # Load Mesh
         try:
-            logger.info(f"Initiating project creation for: {mesh_name}")
             _load_mesh_into_new_project(current_low_poly, self.resolution_int)
             
             # Start polling for idle status after initiating load
@@ -314,33 +326,25 @@ class BatchBakerWidget(QtWidgets.QWidget):
         Args:
             event_object: The event object passed by the dispatcher.
         """
-        logger.info(f"--- Entered _on_bake_finished --- Event Object Type: {type(event_object)}")
-        logger.debug(f"Event Object Dir: {dir(event_object)}")
         
         # Check if the event object is an instance of BakingProcessEnded
         if isinstance(event_object, sp.event.BakingProcessEnded):
-            logger.info("Event type matched BakingProcessEnded (using isinstance).")
             if not self.is_batch_running or self.current_pair_index < 0 or self.current_pair_index >= len(self.mesh_pairs_to_process):
                  logger.warning("_on_bake_finished: Batch not running or index out of bounds. Returning.")
                  return 
                  
             mesh_name = os.path.basename(self.mesh_pairs_to_process[self.current_pair_index][0])
-            logger.info(f"BakingProcessEnded event received for {mesh_name}.")
             
             # Try accessing event data - it might be the object itself or a .data attribute
             bake_data = None
             if isinstance(event_object, dict): # Should not happen now based on type check, but keep for safety
-                logger.debug("Treating event_object directly as bake_data dictionary.")
                 bake_data = event_object
             elif hasattr(event_object, 'data') and isinstance(event_object.data, dict):
-                logger.debug("Accessing event_object.data as bake_data dictionary.")
                 bake_data = event_object.data
             else:
                 # If it's not a dict and doesn't have a .data dict, maybe the object *itself* has the keys?
                 # Try getting status directly from the object attributes
                 if hasattr(event_object, 'status'):
-                    logger.debug("Attempting to read 'status' attribute directly from event_object.")
-                    # Construct a dict-like structure if needed downstream
                     bake_data = {'status': getattr(event_object, 'status', 'success')} 
                 else:
                      logger.warning(f"Could not determine bake_data from event_object. Type: {type(event_object)}, Dir: {dir(event_object)}")
@@ -352,25 +356,22 @@ class BatchBakerWidget(QtWidgets.QWidget):
                  # Compare against the actual enum for success
                  if status != baking.BakingStatus.Success:
                       bake_failed = True
-                      # Log as error only if it's truly not Success
-                      logger.error(f"Bake reported failure. Status: {status}, Data: {bake_data}")
                       QtWidgets.QMessageBox.warning(self, "Bake Error", f"Baking failed for {mesh_name}. Status: {status}. Check logs. Continuing...")
                  else:
-                     logger.info(f"Bake completed successfully for {mesh_name} (Status: {status}).")
+                     logger.info(f"Bake completed successfully for {mesh_name}.")
             else:
                 logger.warning(f"Could not extract bake status dictionary for {mesh_name}.")
 
             if bake_failed:
                  pass # Decide behavior on failure (currently logs and continues)
             else:
-                # --- Export After Successful Bake ---
+                # --- Export After Successful Bake --- 
                 export_path_base = self._get_settings().get('export_folder')
                 export_success = self._export_textures(export_path_base, mesh_name)
                 if not export_success:
                     logger.warning(f"Export failed after successful bake for {mesh_name}, but continuing batch process.")
                     # Decide if we should stop the batch here
 
-            logger.info(f"Proceeding to next mesh after bake/export attempt for {mesh_name}.")
             QtCore.QTimer.singleShot(0, self._process_next_mesh_pair)
         # Removed the else block as isinstance handles non-matching types
 
@@ -385,9 +386,9 @@ class BatchBakerWidget(QtWidgets.QWidget):
         self.loading_low_poly = None
         self.loading_high_poly = None
         
-        self._update_progress(len(self.mesh_pairs_to_process) if len(self.mesh_pairs_to_process)>0 else 1, 
-                              len(self.mesh_pairs_to_process) if len(self.mesh_pairs_to_process)>0 else 1, 
-                              final_message) 
+        # Use the length before clearing for final progress update
+        final_count = len(self.mesh_pairs_to_process) if self.mesh_pairs_to_process else 0
+        self._update_progress(final_count, final_count, final_message) 
         self.progress_bar.setVisible(False)
              
     def _update_progress(self, value, max_value, message=None):
@@ -410,15 +411,17 @@ class BatchBakerWidget(QtWidgets.QWidget):
             return False
         
         # Check high poly folder if maps requiring it are checked
-        needs_high_poly = self.bake_normal_checkbox.isChecked() or self.bake_ao_checkbox.isChecked()
+        needs_high_poly = self.bake_normal_checkbox.isChecked() or \
+                          self.bake_ao_checkbox.isChecked() or \
+                          self.bake_id_checkbox.isChecked()
         if needs_high_poly:
             if not os.path.isdir(self.high_poly_folder.text()):
-                QtWidgets.QMessageBox.warning(self, "Warning", "High poly folder does not exist (required for Normal/AO bake)")
+                QtWidgets.QMessageBox.warning(self, "Warning", "High poly folder does not exist (required for selected bakes)")
                 return False
                 
             high_poly_meshes = _find_mesh_files(self.high_poly_folder.text())
             if not high_poly_meshes:
-                QtWidgets.QMessageBox.warning(self, "Warning", "No mesh files found in high poly folder (required for Normal/AO bake)")
+                QtWidgets.QMessageBox.warning(self, "Warning", "No mesh files found in high poly folder (required for selected bakes)")
                 return False
         
         # Check export folder (now mandatory for batch process)
@@ -464,35 +467,34 @@ class BatchBakerWidget(QtWidgets.QWidget):
         
         mesh_name = os.path.basename(current_low_poly)
         
-        # --- Check if Baking is Needed ---
+        # --- Check if Baking is Needed --- 
         if not self.any_bake_selected:
             logger.info(f"No maps selected for baking. Skipping bake for {mesh_name}.")
-            # --- Export Directly if Baking Skipped ---
-            export_path_base = self._get_settings().get('export_folder')
-            export_success = self._export_textures(export_path_base, mesh_name)
-            if not export_success:
-                 logger.warning(f"Export failed for {mesh_name}, but continuing batch process.")
-                 # Decide if we should stop the batch here
-            # Proceed to next mesh after export attempt
+            logger.info(f"Skipping export for {mesh_name} as no maps were baked.")
             QtCore.QTimer.singleShot(0, self._process_next_mesh_pair)
             return
 
-        # --- Prepare for Bake ---
+        # --- Prepare for Bake --- 
         try:
-            logger.info(f"Attempting to get texture sets for {mesh_name}...") 
             texture_sets = textureset.all_texture_sets()
-            logger.info(f"Found {len(texture_sets)} texture sets for {mesh_name}.") 
             
             if not texture_sets:
                  raise RuntimeError(f"No texture sets found after loading {mesh_name}.")
             
             material_name = texture_sets[0].name() 
             
-            needs_high_poly_for_maps = self.enabled_maps.get('normal', False) or self.enabled_maps.get('ambient_occlusion', False)
+            needs_high_poly_for_maps = self.enabled_maps.get('normal', False) or \
+                                       self.enabled_maps.get('ambient_occlusion', False) or \
+                                       self.enabled_maps.get('id', False)
             
             if needs_high_poly_for_maps and not current_high_poly:
-                logger.warning(f"Normal/AO bake requested but no matching high poly found for {mesh_name}. Skipping bake.")
-                QtWidgets.QMessageBox.warning(self, "Baking Skipped", f"Normal/AO map baking skipped for {mesh_name} as no matching high poly was found.")
+                needed_by = []
+                if self.enabled_maps.get('normal'): needed_by.append("Normal")
+                if self.enabled_maps.get('ambient_occlusion'): needed_by.append("AO")
+                if self.enabled_maps.get('id'): needed_by.append("ID")
+                warning_msg = f"Baking skipped for {mesh_name}: Maps [{', '.join(needed_by)}] require a high poly mesh, but none was found/matched."
+                logger.warning(warning_msg)
+                QtWidgets.QMessageBox.warning(self, "Baking Skipped", warning_msg)
                 QtCore.QTimer.singleShot(0, self._process_next_mesh_pair)
                 return
 
@@ -510,7 +512,6 @@ class BatchBakerWidget(QtWidgets.QWidget):
 
     def _start_polling_for_idle(self, mesh_name):
         """Starts a timer to periodically check if Painter is busy."""
-        logger.info(f"Starting polling for idle status (mesh: {mesh_name})...")
         # Store loading state for the polling check
         self.loading_low_poly = self.mesh_pairs_to_process[self.current_pair_index][0]
         self.loading_high_poly = self.mesh_pairs_to_process[self.current_pair_index][1]
@@ -525,15 +526,12 @@ class BatchBakerWidget(QtWidgets.QWidget):
         if not self.is_batch_running or self.loading_low_poly is None:
             if hasattr(self, 'idle_poll_timer') and self.idle_poll_timer.isActive():
                 self.idle_poll_timer.stop()
-                logger.info("Polling stopped because batch is not running or mesh not loading.")
             return
 
         try:
             is_busy = project.is_busy()
             if not is_busy:
                 self.idle_poll_timer.stop()
-                mesh_name = os.path.basename(self.loading_low_poly)
-                logger.info(f"Polling detected idle status for {mesh_name}. Proceeding...")
                 
                 current_low = self.loading_low_poly
                 current_high = self.loading_high_poly
@@ -549,26 +547,34 @@ class BatchBakerWidget(QtWidgets.QWidget):
                 self.idle_poll_timer.stop()
             self._finish_batch_process(f"Error during idle polling: {e}")
 
-    # --- NEW Export Method ---
-    def _export_textures(self, export_path_base: str, mesh_name: str):
-        """Exports textures for the current project.
-    
-    Args:
+    # --- NEW Export Method ---    
+    def _export_textures(self, export_path_base: str, mesh_name: str) -> bool:
+        """Exports textures for the current project using a custom configuration.
+
+        Args:
             export_path_base: The base directory selected for export.
             mesh_name: The base name of the mesh (e.g., '126_low') to create a subfolder.
+            
+        Returns:
+            True if export was successful, False otherwise.
         """
         if not project.is_open():
             logger.error("Export called but no project is open.")
-            return False # Indicate failure
-            
-        # Create a mesh-specific subfolder
+            return False
+
+        # --- Get Settings Needed for Export ---         
+        settings = self._get_settings() 
+        export_format = settings.get('format', 'png') # Default to png
+        enabled_maps = settings.get('maps', {}) # Get which maps were baked
+        
+        # --- Determine Export Subfolder --- 
         export_subfolder = os.path.join(export_path_base, os.path.splitext(mesh_name)[0])
         try:
             os.makedirs(export_subfolder, exist_ok=True)
         except OSError as e:
             logger.error(f"Could not create export subfolder '{export_subfolder}': {e}")
             QtWidgets.QMessageBox.critical(self, "Export Error", f"Could not create export subfolder: {export_subfolder}\n{e}")
-            return False # Indicate failure
+            return False
             
         logger.info(f"Starting texture export for {mesh_name} to '{export_subfolder}'...")
         self.status_label.setText(f"Exporting {mesh_name}...")
@@ -578,78 +584,134 @@ class BatchBakerWidget(QtWidgets.QWidget):
         texture_sets = textureset.all_texture_sets()
         if not texture_sets:
              logger.error(f"No texture sets found to export for {mesh_name}.")
-             return False # Indicate failure
+             return False 
+
+        # --- Build Custom Export Preset Maps --- 
+        preset_maps = []
+        output_map_names_for_filter = [] # Keep track of defined map names for the filter
+
+        # Define basic parameters based on UI format choice
+        bit_depth = '8' # Default
+        if export_format == 'exr':
+             bit_depth = '16' # Use 16-bit for EXR
+        elif export_format == 'png':
+             bit_depth = '16' # Allow 16-bit PNG
         
-        texture_set_names = [ts.name() for ts in texture_sets]
+        map_base_parameters = {
+            "fileFormat": export_format,
+            "bitDepth": bit_depth,
+            "dithering": False,
+            # sizeLog2 will use project default if not specified
+            "paddingAlgorithm": "infinite" # Apply infinite padding globally later, but can be default here
+        }
 
-        # --- Get Preset URL using ResourceID (based on documentation example) ---
-        preset_name = "Unreal Engine (Packed)"
-        preset_context = "starter_assets" # Assuming it's here
-        preset_identifier_str = f"{preset_context}://export-presets/{preset_name}" # Fallback string
-        preset_url_to_use = preset_identifier_str # Default to fallback
+        # -- Normal Map --
+        if enabled_maps.get('normal'):
+            map_name = "$mesh_$textureSet_Normal"
+            preset_maps.append({
+                "fileName": map_name,
+                "channels": [
+                    {"destChannel": "R", "srcChannel": "R", "srcMapType": "meshMap", "srcMapName": "normal_base"},
+                    {"destChannel": "G", "srcChannel": "G", "srcMapType": "meshMap", "srcMapName": "normal_base"},
+                    {"destChannel": "B", "srcChannel": "B", "srcMapType": "meshMap", "srcMapName": "normal_base"}
+                ],
+                "parameters": map_base_parameters.copy()
+            })
+            output_map_names_for_filter.append(map_name)
+            
+        # -- Ambient Occlusion Map --
+        if enabled_maps.get('ambient_occlusion'):
+            map_name = "$mesh_$textureSet_AmbientOcclusion"
+            preset_maps.append({
+                "fileName": map_name,
+                "channels": [
+                    # Export AO to grayscale (Luminance)
+                    {"destChannel": "L", "srcChannel": "L", "srcMapType": "meshMap", "srcMapName": "ambient_occlusion"}
+                ],
+                "parameters": map_base_parameters.copy()
+            })
+            output_map_names_for_filter.append(map_name)
 
-        try:
-            # Check if ResourceID exists before trying to use it
-            if hasattr(sp.resource, 'ResourceID'):
-                 logger.info(f"Attempting to get preset URL via ResourceID: context='{preset_context}', name='{preset_name}'")
-                 resource_id = sp.resource.ResourceID(context=preset_context, name=preset_name)
-                 # Check if url() method exists on the created object
-                 if hasattr(resource_id, 'url'):
-                     preset_url_from_api = resource_id.url()
-                     if preset_url_from_api:
-                         preset_url_to_use = preset_url_from_api
-                     else:
-                         logger.warning("ResourceID.url() returned empty. Using fallback identifier.")
-                 else:
-                     logger.warning("ResourceID object does not have .url() method. Using fallback identifier.")
-            else:
-                 logger.warning("sp.resource.ResourceID not found. Using fallback identifier string.")
+        # -- ID Map --
+        if enabled_maps.get('id'):
+            map_name = "$mesh_$textureSet_BaseColor" # Output ID data as BaseColor filename, now with mesh name
+            preset_maps.append({
+                "fileName": map_name,
+                "channels": [
+                    # Source is still the ID mesh map
+                    {"destChannel": "R", "srcChannel": "R", "srcMapType": "meshMap", "srcMapName": "id"},
+                    {"destChannel": "G", "srcChannel": "G", "srcMapType": "meshMap", "srcMapName": "id"},
+                    {"destChannel": "B", "srcChannel": "B", "srcMapType": "meshMap", "srcMapName": "id"}
+                ],
+                "parameters": map_base_parameters.copy()
+            })
+            output_map_names_for_filter.append(map_name)
+            
+        # --- Handle Case Where No Maps Were Baked (Maybe export default channels?) ---
+        # For now, if preset_maps is empty, we cannot export based on this config.
+        if not preset_maps:
+            logger.warning(f"No bake maps were enabled for {mesh_name}. Cannot export using custom preset method.")
+            # Optionally: Fallback to a default preset or skip export?
+            # For now, let's skip and return success as nothing *failed*, just nothing to do.
+            self.status_label.setText(f"Skipped export for {mesh_name} (no maps baked)")
+            return True # Return success because no *error* occurred
 
-        except Exception as e:
-            logger.warning(f"Error getting preset URL via ResourceID: {e}. Using fallback identifier: {preset_url_to_use}")
-            # Keep the fallback identifier
-
-        # --- Build Export List (based on documentation example) ---
+        # --- Build Export List --- 
         export_list_items = []
-        texture_sets_to_export = textureset.all_texture_sets()
-        if texture_sets_to_export:
-            for ts in texture_sets_to_export:
-                # Example uses rootPath with TextureSet name
-                export_list_items.append({"rootPath": ts.name()})
-            logger.info(f"Built exportList items (using rootPath = TextureSet name): {export_list_items}")
-        else:
-            logger.warning("No texture sets found to add to the export list.")
+        for ts in texture_sets:
+            export_list_items.append({
+                "rootPath": ts.name(),
+                "exportPreset": "BatchBakerCustomPreset" # Use our defined preset
+            })
 
-        # --- Define Export Configuration (matching documentation example structure) ---
+        # --- Define Full Export Configuration --- 
         export_config = {
-            "exportShaderParams": True,
-            "exportPath": export_subfolder, # Global export path
-            "defaultExportPreset" : preset_url_to_use, # Use the determined preset URL or fallback
-            "exportList": export_list_items, # List with {'rootPath': ts_name}
+            "exportPath": export_subfolder,
+            "exportShaderParams": False, # Typically not needed for just textures
+            "exportPresets": [
+                {
+                    "name": "BatchBakerCustomPreset",
+                    "maps": preset_maps
+                }
+            ],
+            "exportList": export_list_items,
             "exportParameters": [
-                # Keep existing padding parameter
-                { "parameters": { "paddingAlgorithm": "infinite" } } 
+                # Global parameter override (e.g., ensure infinite padding for all)
+                # Note: padding was also set in map_base_parameters, this acts as a final override
+                { 
+                    "filter": {}, # Apply to all
+                    "parameters": { "paddingAlgorithm": "infinite" } 
+                }
             ]
         }
 
+        # --- Execute Export --- 
         try:
-            # Start export
             result = export.export_project_textures(export_config)
             
-            # Check result status
             if result.status == ExportStatus.Success:
                 logger.info(f"Texture export successful for {mesh_name}.")
                 self.status_label.setText(f"Exported {mesh_name}")
-                return True # Indicate success
+                return True
             else:
                 logger.error(f"Texture export failed for {mesh_name}. Status: {result.status}, Message: {result.message}")
+                # Attempt to log configuration on failure for easier debug
+                try:
+                     logger.error(f"Failing Export Config: {export_config}")
+                except Exception as log_e:
+                     logger.error(f"Could not log full export config on failure: {log_e}")
                 QtWidgets.QMessageBox.critical(self, "Export Error", f"Texture export failed for {mesh_name}:\n{result.message}")
-                return False # Indicate failure
+                return False
                 
         except Exception as e:
             logger.exception(f"An unexpected error occurred during export for {mesh_name}: {e}")
+            # Attempt to log configuration on exception
+            try:
+                 logger.error(f"Failing Export Config (Exception): {export_config}")
+            except Exception as log_e:
+                 logger.error(f"Could not log full export config on exception: {log_e}")
             QtWidgets.QMessageBox.critical(self, "Export Error", f"An unexpected error occurred during export for {mesh_name}:\n{e}")
-            return False # Indicate failure
+            return False
 
 #--------------------------------------------------------
 # BAKER FUNCTIONALITY (Reverted)
@@ -660,17 +722,14 @@ def _load_mesh_into_new_project(low_poly: str, resolution: int):
     logger.info(f"Attempting to load mesh: {os.path.basename(low_poly)}")
     
     if project.is_open():
-        logger.info("Closing existing project...")
         project.close()
 
-    logger.info(f"Creating new project with mesh: {low_poly}")
     try:
         project_settings = project.Settings(
             normal_map_format=project.NormalMapFormat.DirectX,
             default_texture_resolution=resolution
         )
         project.create(mesh_file_path=low_poly, settings=project_settings)
-        logger.info(f"Project creation command sent for: {os.path.basename(low_poly)}")
 
     except Exception as e:
         logger.error(f"Error during project creation: {str(e)}")
@@ -679,74 +738,99 @@ def _load_mesh_into_new_project(low_poly: str, resolution: int):
         raise RuntimeError(f"Failed to create project with mesh {low_poly}: {str(e)}")
 
 def _bake_selected_maps(high_poly: str | None, material_name: str, enabled_maps: Dict[str, bool]):
-    """Initiates asynchronous baking of the selected maps. (Reverted to simpler version)"""
+    """Initiates asynchronous baking of the selected maps."""
     bake_normal = enabled_maps.get('normal', False)
     bake_ao = enabled_maps.get('ambient_occlusion', False)
-    bake_id = enabled_maps.get('id', False) # Assuming ID comes from Vertex Color implicitly
+    bake_id = enabled_maps.get('id', False)
 
     if not (bake_normal or bake_ao or bake_id):
-        logger.info("No maps selected for baking in _bake_selected_maps.")
-        return # Nothing to do
+        return
     
     log_high_poly = os.path.basename(high_poly) if high_poly else "None"
     enabled_map_names = [k for k, v in enabled_maps.items() if v]
-    logger.info(f"Configuring bake for material '{material_name}' with high poly '{log_high_poly}'. Enabled maps: {enabled_map_names}")
 
     try:
         baking_params = baking.BakingParameters.from_texture_set_name(material_name)
         if not baking_params:
             raise ValueError(f"Could not get BakingParameters for TextureSet '{material_name}'.")
 
-        # Get common parameters (may not be strictly needed if not setting them)
         common_params = baking_params.common()
         if not common_params:
              logger.warning("Could not retrieve common baking parameters (might be ok).")
 
-        # --- Prepare minimal parameters ---
+        # --- Prepare minimal parameters --- 
         parameters_to_set = {}
-        if (bake_normal or bake_ao) and high_poly:
-            # Find the HipolyMesh key dynamically if possible
-            hipoly_key_name = 'HipolyMesh' # Assume default key name
+        hipoly_key_name = 'HipolyMesh'
+        # Set high poly mesh if needed by ANY selected map that uses it
+        if (bake_normal or bake_ao or bake_id) and high_poly:
             hipoly_prop = common_params.get(hipoly_key_name) if common_params else None
-            
             if hipoly_prop:
                  highpoly_mesh_path_url = QtCore.QUrl.fromLocalFile(high_poly).toString()
                  parameters_to_set[hipoly_prop] = highpoly_mesh_path_url
-                 logger.info(f"Setting high poly mesh: {highpoly_mesh_path_url}")
-        else:
-                 logger.warning(f"Could not find property for '{hipoly_key_name}'. High poly might not be set.")
-                 # Optionally, could try setting by string key if property lookup fails
-                 # parameters_to_set[hipoly_key_name] = QtCore.QUrl.fromLocalFile(high_poly).toString()
+            elif hipoly_key_name not in parameters_to_set: 
+                 logger.warning(f"Could not find property object for '{hipoly_key_name}'. Attempting to set high poly mesh by key string.")
+                 try:
+                     parameters_to_set[hipoly_key_name] = QtCore.QUrl.fromLocalFile(high_poly).toString()
+                 except Exception as e:
+                      logger.error(f"Failed to set high poly mesh using key string '{hipoly_key_name}': {e}")
+        elif (bake_normal or bake_ao or bake_id) and not high_poly:
+            needed_by = []
+            if bake_normal: needed_by.append("Normal")
+            if bake_ao: needed_by.append("AO")
+            if bake_id: needed_by.append("ID (from High Poly)")
+            logger.warning(f"High poly mesh required by [{', '.join(needed_by)}] but not provided or found. Bake may fail or produce incorrect results.")
 
-        # Set Cage Mode if needed for Normal/AO
-        cage_key = 'CageMode' # Default key, adjust if Substance API uses a different one
+        # Set Cage Mode only if needed for Normal/AO
+        cage_key = 'CageMode'
         cage_value = 'Automatic (experimental)'
-        if bake_normal or bake_ao:
-            logger.info(f"Attempting to set cage mode to '{cage_value}' (using key '{cage_key}')")
+        if (bake_normal or bake_ao) and high_poly: 
             if common_params and cage_key in common_params:
                  cage_prop = common_params[cage_key]
                  try:
-                      # Check if enum_value method exists and the value is valid before calling
                       if hasattr(cage_prop, 'enum_value') and hasattr(cage_prop, 'enum_values') and cage_value in cage_prop.enum_values():
                           parameters_to_set[cage_prop] = cage_prop.enum_value(cage_value)
-                          logger.info(f"Successfully set cage mode using enum value via property.")
                       else:
-                          logger.warning(f"Property '{cage_key}' does not support enum value '{cage_value}' or method unavailable. Falling back to setting string value directly on property.")
-                          parameters_to_set[cage_prop] = cage_value # Fallback to string assignment on property object
-                 except Exception as e: # Catch potential errors during enum access/assignment
+                          parameters_to_set[cage_prop] = cage_value 
+                 except Exception as e: 
                      logger.warning(f"Error setting cage mode via property '{cage_key}': {e}. Falling back to setting string value directly on property.")
                      try:
-                         parameters_to_set[cage_prop] = cage_value # Try string assignment on property again
+                         parameters_to_set[cage_prop] = cage_value 
                      except Exception as final_e:
                          logger.error(f"Failed to set cage mode even with string fallback on property: {final_e}. Trying key string assignment as last resort.")
-                         # If assigning to property fails, try assigning to key string
                          parameters_to_set[cage_key] = cage_value
             else:
                  logger.warning(f"Could not find property for '{cage_key}' in common_params or common_params unavailable. Attempting to set cage mode by key string '{cage_key}'.")
-                 # Fallback: Set using the string key directly if property/common_params not found
                  parameters_to_set[cage_key] = cage_value
 
-        # --- Enable Bakers ---
+        # --- Configure ID Specific Parameters --- 
+        if bake_id:
+            if not high_poly:
+                # Warning logged above if high poly missing but needed
+                pass # logger.warning("ID bake requested, but no high poly mesh provided. Cannot bake ID map from high poly vertex colors. Skipping ID map configuration.")
+            else:
+                id_baker = baking_params.baker(baking.MeshMapUsage.ID)
+                if id_baker:
+                    id_params = id_baker
+                    id_param_keys = id_params.keys()
+                    color_source_key = None 
+                    for key in id_param_keys:
+                        if 'color' in key.lower() and 'source' in key.lower():
+                            color_source_key = key
+                            break 
+                    if color_source_key:
+                        color_source_prop = id_params[color_source_key]
+                        try:
+                            # Set Color Source to Vertex Color (assumes 0 means use Vertex Color param)
+                            vertex_color_int_value = 0 
+                            parameters_to_set[color_source_prop] = vertex_color_int_value
+                        except Exception as e:
+                            logger.error(f"  Failed to set ID Param '{color_source_key}' using integer value {vertex_color_int_value}: {e}")
+                    else:
+                        logger.warning("  Could not find the 'Color Source' parameter key for the ID baker.")
+                else:
+                     logger.warning("Could not get ID baker parameters.") 
+
+        # --- Enable Bakers --- 
         available_enums = {}
         if hasattr(baking, 'MeshMapUsage'):
             for name in dir(baking.MeshMapUsage):
@@ -761,7 +845,7 @@ def _bake_selected_maps(high_poly: str | None, material_name: str, enabled_maps:
         requested_to_enum_name = {}
         if bake_normal: requested_to_enum_name['normal'] = 'Normal'
         if bake_ao: requested_to_enum_name['ambient_occlusion'] = 'AO'
-        if bake_id: requested_to_enum_name['id'] = 'ID' # Assuming 'ID' corresponds to VertexColor source implicitly
+        if bake_id: requested_to_enum_name['id'] = 'ID' 
 
         bakers_to_enable_enums = []
         enabled_baker_names_log = []
@@ -776,19 +860,17 @@ def _bake_selected_maps(high_poly: str | None, material_name: str, enabled_maps:
              raise RuntimeError("No requested bakers could be enabled.")
         
         baking_params.set_enabled_bakers(bakers_to_enable_enums)
-        logger.info(f"Successfully enabled bakers: {enabled_baker_names_log}")
 
-        # --- Set Parameters (only high poly if needed) ---
+        # --- Set Parameters --- 
         if parameters_to_set:
-            logger.info(f"Setting parameters: {parameters_to_set}")
+            logger.info(f"Setting parameters for bake: {list(parameters_to_set.keys())}")
             baking.BakingParameters.set(parameters_to_set)
         else:
-            logger.info("No specific parameters needed to be set apart from enabling bakers.")
+            logger.info("No specific bake parameters needed beyond defaults.")
 
         # --- Start Bake ---
         logger.info("Starting asynchronous bake...")
-        baking.bake_selected_textures_async() 
-        logger.info("Asynchronous bake initiated.")
+        baking.bake_selected_textures_async()
 
     except Exception as e:
         error_msg = f"Failed to configure or start bake for '{material_name}': {str(e)}"
@@ -815,7 +897,6 @@ def close_plugin():
         # Disconnect the listeners first
         try:
             sp.event.DISPATCHER.disconnect(sp.event.BakingProcessEnded, batch_baker_widget._on_bake_finished)
-            logger.info("Disconnected BakingProcessEnded listener.")
         except Exception as e:
             logger.warning(f"Failed to disconnect BakingProcessEnded listener: {str(e)}")
             
@@ -826,25 +907,15 @@ def close_plugin():
         sp.ui.delete_ui_element(batch_baker_widget)
         batch_baker_widget = None
     
-    # Clean up temporary files
-    temp_dir = os.path.join(PLUGIN_PATH, "temp")
-    if os.path.exists(temp_dir):
-        try:
-            import shutil
-            shutil.rmtree(temp_dir)
-            logger.info(f"Cleaned up temporary files in {temp_dir}")
-        except Exception as e:
-            logger.warning(f"Failed to clean up temporary files: {str(e)}")
-        
-    logger.info("Batch Baker plugin closed") 
+    logger.info("Batch Baker plugin closed")
 
 #--------------------------------------------------------
 # Helper Functions 
 #--------------------------------------------------------
 def _find_mesh_files(folder_path: str) -> List[str]:
-    """Finds mesh files (.fbx, .obj) in the specified folder."""
+    """Finds mesh files (.fbx, .obj, .ply) in the specified folder."""
     mesh_files = []
-    supported_extensions = ('.fbx', '.obj') 
+    supported_extensions = ('.fbx', '.obj', '.ply') 
     try:
         for filename in os.listdir(folder_path):
             if filename.lower().endswith(supported_extensions):
@@ -853,13 +924,12 @@ def _find_mesh_files(folder_path: str) -> List[str]:
         logger.warning(f"Mesh folder not found: {folder_path}")
     except Exception as e:
          logger.error(f"Error reading mesh folder {folder_path}: {e}")
-    logger.info(f"Found {len(mesh_files)} mesh files in {folder_path}")
     return sorted(mesh_files) 
 
 def _extract_base_name(filename: str) -> str:
     """Extracts the base name from a mesh filename (e.g., 'mesh_low.fbx' -> 'mesh')."""
     base = os.path.basename(filename)
-    base = re.sub(r'(_low|_lp|_high|_hp)?(\.fbx|\.obj)$', '', base, flags=re.IGNORECASE)
+    base = re.sub(r'(_low|_lp|_high|_hp)?(\.fbx|\.obj|\.ply)$', '', base, flags=re.IGNORECASE)
     return base
 
 def _match_meshes(high_poly_meshes: List[str], low_poly_meshes: List[str], match_by_naming: bool) -> List[Tuple[str, str | None]]:
@@ -870,34 +940,31 @@ def _match_meshes(high_poly_meshes: List[str], low_poly_meshes: List[str], match
         logger.warning("No low poly meshes provided for matching.")
         return []
 
+    # Check high poly list existence before proceeding
     if not high_poly_meshes:
-        logger.warning("No high poly meshes provided. Baking from high poly will not be possible.")
-        return [(lp, None) for lp in low_poly_meshes]
+        return [(lp, None) for lp in low_poly_meshes] # Return low polys paired with None
 
     if match_by_naming:
-        logger.info("Attempting to match high/low meshes by base name...")
         low_poly_map = { _extract_base_name(lp): lp for lp in low_poly_meshes }
         high_poly_map = { _extract_base_name(hp): hp for hp in high_poly_meshes }
 
         for base_name, lp_path in low_poly_map.items():
             hp_path = high_poly_map.get(base_name)
-            mesh_pairs.append((lp_path, hp_path)) # Will be None if no match
+            mesh_pairs.append((lp_path, hp_path)) 
             if not hp_path:
                  logger.warning(f"  No matching high poly found for base name '{base_name}' (Low: '{os.path.basename(lp_path)}')")
             
     else:
-        logger.info("Match by naming disabled.")
         if len(high_poly_meshes) == 1:
             hp_path = high_poly_meshes[0]
-            logger.info(f"Using single high poly '{os.path.basename(hp_path)}' for all low poly meshes.")
             mesh_pairs = [(lp, hp_path) for lp in low_poly_meshes]
         elif len(high_poly_meshes) > 1:
              logger.warning("Multiple high poly meshes found, but matching by name is disabled. Cannot determine pairings.")
              mesh_pairs = [(lp, None) for lp in low_poly_meshes]
-        else: # No high poly meshes
+        else: # No high poly meshes (already handled above, but keep for safety)
              mesh_pairs = [(lp, None) for lp in low_poly_meshes]
 
-    if not mesh_pairs:
-         logger.warning("Could not form any mesh pairs based on the current settings.")
+    if not mesh_pairs and low_poly_meshes: # Only warn if low polys existed but no pairs were made
+         logger.warning("Could not form any mesh pairs based on the current settings and found meshes.")
          
     return mesh_pairs 
