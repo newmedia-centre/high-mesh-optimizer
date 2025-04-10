@@ -13,6 +13,8 @@ The workflow involves two main parts:
 
 These scripts are designed to be run via the Blender Command Line Interface (CLI) to prepare your models for baking. This is useful for automation and batch processing.
 
+**Note:** These scripts require Blender version 4.4 or newer.
+
 *   `batch_flip_merge_normal.py`:
     *   **Purpose:** Designed for high-poly meshes. It ensures normals are consistent (often recalculating outside) and merges vertices by distance to close small gaps, which helps improve baking results, especially for Normal and AO maps.
     *   **Usage (CLI):**
