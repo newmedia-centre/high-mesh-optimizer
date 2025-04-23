@@ -8,16 +8,14 @@ argv = sys.argv
 argv = argv[argv.index("--") + 1:] if "--" in argv else []
 
 if len(argv) < 1:
-    print("Usage: blender --background --python batch_uv_unwrap.py -- input_directory [output_directory] [margin] [island_margin]")
-    print("  margin: Unwrap margin (default: 0.001)")
-    print("  island_margin: Island margin (default: 0.02)")
+    print("Usage: blender --background --python batch_uv_unwrap.py -- input_directory [output_directory] [island_margin]")
+    print("  island_margin: Island margin (default: 0)")
     sys.exit(1)
 
 # Get input and output directories and parameters
 input_dir = argv[0].strip('"\'')  # Remove any quotes
 output_dir = argv[1].strip('"\'') if len(argv) > 1 else input_dir
-unwrap_margin = float(argv[2]) if len(argv) > 2 else 0.001
-island_margin = float(argv[3]) if len(argv) > 3 else 0.02
+island_margin = float(argv[3]) if len(argv) > 3 else 0
 
 # Fix any square brackets in paths which can cause issues on Windows
 input_dir = input_dir.replace('[', '_').replace(']', '_')
@@ -25,7 +23,6 @@ output_dir = output_dir.replace('[', '_').replace(']', '_')
 
 print(f"Sanitized Input directory: {input_dir}")
 print(f"Sanitized Output directory: {output_dir}")
-print(f"Unwrap margin: {unwrap_margin}")
 print(f"Island margin: {island_margin}")
 
 # Ensure paths are absolute and normalized
@@ -54,7 +51,7 @@ def clear_scene():
     bpy.ops.object.delete()
 
 # Process each model file in the input directory
-def process_models(input_directory, output_directory, margin, island_margin):
+def process_models(input_directory, output_directory, island_margin):
     # Supported file extensions
     model_extensions = ['.obj', '.fbx', '.3ds', '.dae', '.ply', '.stl', '.glb', '.gltf']
     
@@ -170,7 +167,7 @@ print(f"Input directory: {input_dir}")
 print(f"Output directory: {output_dir}")
 
 try:
-    process_models(input_dir, output_dir, unwrap_margin, island_margin)
+    process_models(input_dir, output_dir, island_margin)
     print("Batch UV unwrapping completed successfully!")
 except Exception as e:
     print(f"Error during processing: {str(e)}") 

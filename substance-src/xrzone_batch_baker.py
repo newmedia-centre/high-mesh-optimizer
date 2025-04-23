@@ -540,7 +540,6 @@ class BatchBakerWidget(QtWidgets.QWidget):
                 self.idle_poll_timer.stop()
             self._finish_batch_process(f"Error during idle polling: {e}")
 
-    # --- NEW Export Method ---    
     def _export_textures(self, export_path_base: str, mesh_name: str) -> bool:
         """Exports textures for the current project using a custom configuration.
 
@@ -560,16 +559,16 @@ class BatchBakerWidget(QtWidgets.QWidget):
         export_format = settings.get('format', 'png') # Default to png
         enabled_maps = settings.get('maps', {}) # Get which maps were baked
         
-        # --- Determine Export Subfolder --- 
-        export_subfolder = os.path.join(export_path_base, os.path.splitext(mesh_name)[0])
-        try:
-            os.makedirs(export_subfolder, exist_ok=True)
-        except OSError as e:
-            logger.error(f"Could not create export subfolder '{export_subfolder}': {e}")
-            QtWidgets.QMessageBox.critical(self, "Export Error", f"Could not create export subfolder: {export_subfolder}\n{e}")
-            return False
-            
-        logger.info(f"Starting texture export for {mesh_name} to '{export_subfolder}'...")
+        # --- Use Export Path Directly --- 
+        if not os.path.isdir(export_path_base):
+            try:
+                os.makedirs(export_path_base, exist_ok=True)
+            except OSError as e:
+                logger.error(f"Could not create export directory '{export_path_base}': {e}")
+                QtWidgets.QMessageBox.critical(self, "Export Error", f"Could not create export directory: {export_path_base}\n{e}")
+                return False
+        
+        logger.info(f"Starting texture export for {mesh_name} to '{export_path_base}'...")
         self.status_label.setText(f"Exporting {mesh_name}...")
         QtWidgets.QApplication.processEvents() # Update UI
         
@@ -659,7 +658,7 @@ class BatchBakerWidget(QtWidgets.QWidget):
 
         # --- Define Full Export Configuration --- 
         export_config = {
-            "exportPath": export_subfolder,
+            "exportPath": export_path_base,
             "exportShaderParams": False, # Typically not needed for just textures
             "exportPresets": [
                 {

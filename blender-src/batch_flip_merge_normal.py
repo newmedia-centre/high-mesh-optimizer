@@ -124,6 +124,7 @@ def process_models(input_directory, output_directory):
         bpy.ops.mesh.select_all(action='SELECT')
         bpy.ops.mesh.flip_normals()
         bpy.ops.mesh.merge_normals()
+        bpy.ops.mesh.faces_shade_smooth()
         bpy.ops.object.mode_set(mode='OBJECT')
         
         # Create output filename
